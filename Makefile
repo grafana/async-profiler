@@ -104,7 +104,7 @@ $(PACKAGE_NAME).tar.gz: $(PACKAGE_DIR)
 	rm -r $(PACKAGE_DIR)
 
 $(PACKAGE_NAME).zip: $(PACKAGE_DIR)
-	codesign -s "Developer ID" -o runtime --timestamp -v $(PACKAGE_DIR)/build/$(JATTACH) $(PACKAGE_DIR)/build/$(LIB_PROFILER_SO)
+	# codesign -s "Developer ID" -o runtime --timestamp -v $(PACKAGE_DIR)/build/$(JATTACH) $(PACKAGE_DIR)/build/$(LIB_PROFILER_SO)
 	ditto -c -k --keepParent $(PACKAGE_DIR) $@
 	rm -r $(PACKAGE_DIR)
 
