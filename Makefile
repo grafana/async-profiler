@@ -1,4 +1,4 @@
-PROFILER_VERSION=3.0.0
+PROFILER_VERSION=3.0.0.0
 
 PACKAGE_NAME=async-profiler-$(PROFILER_VERSION)-$(OS_TAG)-$(ARCH_TAG)
 PACKAGE_DIR=/tmp/$(PACKAGE_NAME)
@@ -55,6 +55,7 @@ else
   PACKAGE_EXT=tar.gz
   ifeq ($(findstring musl,$(shell ldd /bin/ls)),musl)
     OS_TAG=linux-musl
+    CXXFLAGS += -static-libgcc -static-libstdc++
   else
     OS_TAG=linux
   endif
@@ -160,3 +161,6 @@ native:
 
 clean:
 	$(RM) -r build
+
+version:
+	@echo $(PROFILER_VERSION)
