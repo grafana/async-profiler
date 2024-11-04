@@ -35,65 +35,51 @@
 class LinuxThreadList : public ThreadList {
   private:
     DIR* _dir;
-    int _thread_count;
+    int* _thread_array;
+    u32 _capacity;
 
-    int getThreadCount() {
-        char buf[512];
-        int fd = open("/proc/self/stat", O_RDONLY);
-        if (fd == -1) {
-            return 0;
+    void addThread(int thread_id) {
+        if (_count >= _capacity) {
+            _capacity = _count * 2;
+            _thread_array = (int*)realloc(_thread_array, _capacity * sizeof(int));
         }
+        _thread_array[_count++] = thread_id;
+    }
 
-        int thread_count = 0;
-        if (read(fd, buf, sizeof(buf)) > 0) {
-            char* s = strchr(buf, ')');
-            if (s != NULL) {
-                // Read 18th integer field after the command name
-                for (int field = 0; *s != ' ' || ++field < 18; s++) ;
-                thread_count = atoi(s + 1);
+    void fillThreadArray() {
+        if (_dir != NULL) {
+            rewinddir(_dir);
+            struct dirent* entry;
+            while ((entry = readdir(_dir)) != NULL) {
+                if (entry->d_name[0] != '.') {
+                    addThread(atoi(entry->d_name));
+                }
             }
         }
-
-        close(fd);
-        return thread_count;
     }
 
   public:
-    LinuxThreadList() {
+    LinuxThreadList() : ThreadList() {
         _dir = opendir("/proc/self/task");
-        _thread_count = -1;
+        _capacity = 128;
+        _thread_array = (int*)malloc(_capacity * sizeof(int));
+        fillThreadArray();
     }
 
     ~LinuxThreadList() {
+        free(_thread_array);
         if (_dir != NULL) {
             closedir(_dir);
         }
     }
 
-    void rewind() {
-        if (_dir != NULL) {
-            rewinddir(_dir);
-        }
-        _thread_count = -1;
-    }
-
     int next() {
-        if (_dir != NULL) {
-            struct dirent* entry;
-            while ((entry = readdir(_dir)) != NULL) {
-                if (entry->d_name[0] != '.') {
-                    return atoi(entry->d_name);
-                }
-            }
-        }
-        return -1;
+        return _thread_array[_index++];
     }
 
-    int size() {
-        if (_thread_count < 0) {
-            _thread_count = getThreadCount();
-        }
-        return _thread_count;
+    void update() {
+        _index = _count = 0;
+        fillThreadArray();
     }
 };
 
@@ -106,6 +92,8 @@ JitWriteProtection::~JitWriteProtection() {
     // Not used on Linux
 }
 
+
+static SigAction installed_sigaction[64];
 
 const size_t OS::page_size = sysconf(_SC_PAGESIZE);
 const size_t OS::page_mask = OS::page_size - 1;
@@ -175,7 +163,7 @@ int OS::threadId() {
 const char* OS::schedPolicy(int thread_id) {
     int sched_policy = sched_getscheduler(thread_id);
     if (sched_policy >= SCHED_BATCH) {
-        return sched_policy >= SCHED_IDLE ? "SCHED_IDLE" : "SCHED_BATCH"; 
+        return sched_policy >= SCHED_IDLE ? "SCHED_IDLE" : "SCHED_BATCH";
     }
     return "SCHED_OTHER";
 }
@@ -216,6 +204,21 @@ ThreadState OS::threadState(int thread_id) {
     return state;
 }
 
+u64 OS::threadCpuTime(int thread_id) {
+    clockid_t thread_cpu_clock;
+    if (thread_id) {
+        thread_cpu_clock = ((~(unsigned int)(thread_id)) << 3) | 6;  // CPUCLOCK_SCHED | CPUCLOCK_PERTHREAD_MASK
+    } else {
+        thread_cpu_clock = CLOCK_THREAD_CPUTIME_ID;
+    }
+
+    struct timespec ts;
+    if (clock_gettime(thread_cpu_clock, &ts) == 0) {
+        return (u64)ts.tv_sec * 1000000000 + ts.tv_nsec;
+    }
+    return 0;
+}
+
 ThreadList* OS::listThreads() {
     return new LinuxThreadList();
 }
@@ -235,6 +238,9 @@ SigAction OS::installSignalHandler(int signo, SigAction action, SigHandler handl
     } else {
         sa.sa_sigaction = action;
         sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        if (signo > 0 && signo < sizeof(installed_sigaction) / sizeof(installed_sigaction[0])) {
+            installed_sigaction[signo] = action;
+        }
     }
 
     sigaction(signo, &sa, &oldsa);
@@ -248,6 +254,28 @@ SigAction OS::replaceCrashHandler(SigAction action) {
     sa.sa_sigaction = action;
     sigaction(SIGSEGV, &sa, NULL);
     return old_action;
+}
+
+int OS::getProfilingSignal(int mode) {
+    static int preferred_signals[2] = {SIGPROF, SIGVTALRM};
+
+    const u64 allowed_signals =
+        1ULL << SIGPROF | 1ULL << SIGVTALRM | 1ULL << SIGSTKFLT | 1ULL << SIGPWR | -(1ULL << SIGRTMIN);
+
+    int& signo = preferred_signals[mode];
+    int initial_signo = signo;
+    int other_signo = preferred_signals[1 - mode];
+
+    do {
+        struct sigaction sa;
+        if ((allowed_signals & (1ULL << signo)) != 0 && signo != other_signo && sigaction(signo, NULL, &sa) == 0) {
+            if (sa.sa_handler == SIG_DFL || sa.sa_handler == SIG_IGN || sa.sa_sigaction == installed_sigaction[signo]) {
+                return signo;
+            }
+        }
+    } while ((signo = (signo + 53) & 63) != initial_signo);
+
+    return signo;
 }
 
 bool OS::sendSignalToThread(int thread_id, int signo) {
@@ -321,6 +349,10 @@ u64 OS::getTotalCpuTime(u64* utime, u64* stime) {
 
     close(fd);
     return real;
+}
+
+int OS::createMemoryFile(const char* name) {
+    return syscall(__NR_memfd_create, name, 0);
 }
 
 void OS::copyFile(int src_fd, int dst_fd, off_t offset, size_t size) {

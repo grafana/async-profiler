@@ -144,6 +144,11 @@ bool StackFrame::unwindCompiled(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintp
     return false;
 }
 
+bool StackFrame::unwindAtomicStub(const void*& pc) {
+    // Not needed
+    return false;
+}
+
 void StackFrame::adjustSP(const void* entry, const void* pc, uintptr_t& sp) {
     // Not needed
 }
@@ -193,7 +198,7 @@ bool StackFrame::checkInterruptedSyscall() {
     if (REG(EFL, rflags) & 1) {
         return (retval() & 0xff) == EINTR || (retval() & 0xff) == ETIMEDOUT;
     } else {
-        return retval() == (uintptr_t)-EINTR; 
+        return retval() == (uintptr_t)-EINTR;
     }
 #else
     if (retval() == (uintptr_t)-EINTR) {

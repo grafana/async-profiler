@@ -12,9 +12,8 @@ async-profiler can trace the following kinds of events:
  - Allocations in Java Heap
  - Contented lock attempts, including both Java object monitors and ReentrantLocks
 
-See our [Wiki](https://github.com/async-profiler/async-profiler/wiki) or
-[3 hours playlist](https://www.youtube.com/playlist?list=PLNCLTEx3B8h4Yo_WvKWdLvI9mj1XpTKBr)
-to learn about all features. 
+See our [3 hours playlist](https://www.youtube.com/playlist?list=PLNCLTEx3B8h4Yo_WvKWdLvI9mj1XpTKBr)
+to learn about more features. 
 
 ## Download
 
@@ -30,6 +29,10 @@ Current release (3.0):
 
 async-profiler also comes bundled with IntelliJ IDEA Ultimate 2018.3 and later.  
 For more information refer to [IntelliJ IDEA documentation](https://www.jetbrains.com/help/idea/cpu-and-allocation-profiling-basic-concepts.html).
+
+[Nightly releases](https://github.com/async-profiler/async-profiler/releases/tag/nightly) (published on each commit to master)
+
+For the build corresponding to a previous commit, go to the corresponding `Publish Nightly Builds` Github Action and scroll down to the artifacts section. These binaries are kept for 30 days.
 
 ## Supported platforms
 
@@ -350,11 +353,10 @@ $ asprof -d 30 -f /tmp/flamegraph.html 8983
   Useful for finding Java heap memory leaks.
 
 * `--lock N` - lock profiling threshold in nanoseconds (or other units).
-  In lock profiling mode, record contended locks that the JVM has waited for
-  longer than the specified duration.
+  In lock profiling mode, sample contended locks when total lock duration
+  overflows the threshold.
 
-* `-j N` - sets the Java stack profiling depth. This option will be ignored if N is greater
-  than default 2048.  
+* `-j N` - sets the maximum stack depth. The default is 2048.  
   Example: `asprof -j 30 8983`
 
 * `-t` - profile threads separately. Each stack trace will end with a frame
@@ -455,6 +457,11 @@ $ asprof -d 30 -f /tmp/flamegraph.html 8983
   you choose (e.g. `cpu` or `wall`), the profiler will work as usual, except that
   only events between the safepoint request and the start of the VM operation
   will be recorded.
+
+* `--jfropts OPTIONS` - comma separated list of JFR recording options.
+  Currently, the only available option is `mem` supported on Linux 3.17+.
+  `mem` enables accumulating events in memory instead of flushing
+  synchronously to a file.
 
 * `--jfrsync CONFIG` - start Java Flight Recording with the given configuration
   synchronously with the profiler. The output .jfr file will include all regular

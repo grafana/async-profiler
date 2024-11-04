@@ -7,9 +7,9 @@
 #include <pthread.h>
 #include "cpuEngine.h"
 #include "j9StackTraces.h"
-#include "os.h"
 #include "profiler.h"
 #include "stackWalker.h"
+#include "tsc.h"
 #include "vmStructs.h"
 
 
@@ -95,7 +95,8 @@ int CpuEngine::createForAllThreads() {
     int result = EPERM;
 
     ThreadList* thread_list = OS::listThreads();
-    for (int tid; (tid = thread_list->next()) != -1; ) {
+    while (thread_list->hasNext()) {
+        int tid = thread_list->next();
         int err = createForThread(tid);
         if (isResourceLimit(err)) {
             result = err;
@@ -112,7 +113,7 @@ int CpuEngine::createForAllThreads() {
 void CpuEngine::signalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
     if (!_enabled) return;
 
-    ExecutionEvent event;
+    ExecutionEvent event(TSC::ticks());
     Profiler::instance()->recordSample(ucontext, _interval, EXECUTION_SAMPLE, &event);
 }
 

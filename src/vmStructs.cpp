@@ -45,32 +45,36 @@ int VMStructs::_anchor_pc_offset = -1;
 int VMStructs::_anchor_fp_offset = -1;
 int VMStructs::_frame_size_offset = -1;
 int VMStructs::_frame_complete_offset = -1;
-int VMStructs::_code_begin_offset = -1;
-int VMStructs::_scopes_begin_offset = -1;
+int VMStructs::_code_offset = -1;
+int VMStructs::_data_offset = -1;
+int VMStructs::_scopes_pcs_offset = -1;
+int VMStructs::_scopes_data_offset = -1;
 int VMStructs::_nmethod_name_offset = -1;
 int VMStructs::_nmethod_method_offset = -1;
 int VMStructs::_nmethod_entry_offset = -1;
 int VMStructs::_nmethod_state_offset = -1;
 int VMStructs::_nmethod_level_offset = -1;
 int VMStructs::_nmethod_metadata_offset = -1;
-int VMStructs::_nmethod_pcs_begin_offset = -1;
-int VMStructs::_nmethod_pcs_end_offset = -1;
+int VMStructs::_nmethod_immutable_offset = -1;
 int VMStructs::_method_constmethod_offset = -1;
 int VMStructs::_method_code_offset = -1;
 int VMStructs::_constmethod_constants_offset = -1;
 int VMStructs::_constmethod_idnum_offset = -1;
 int VMStructs::_constmethod_size = -1;
 int VMStructs::_pool_holder_offset = -1;
+int VMStructs::_array_len_offset = 0;
 int VMStructs::_array_data_offset = -1;
 int VMStructs::_code_heap_memory_offset = -1;
 int VMStructs::_code_heap_segmap_offset = -1;
 int VMStructs::_code_heap_segment_shift = -1;
+int VMStructs::_heap_block_used_offset = -1;
 int VMStructs::_vs_low_bound_offset = -1;
 int VMStructs::_vs_high_bound_offset = -1;
 int VMStructs::_vs_low_offset = -1;
 int VMStructs::_vs_high_offset = -1;
 int VMStructs::_flag_name_offset = -1;
 int VMStructs::_flag_addr_offset = -1;
+int VMStructs::_flag_origin_offset = -1;
 const char* VMStructs::_flags_addr = NULL;
 int VMStructs::_flag_count = 0;
 int VMStructs::_flag_size = 0;
@@ -123,18 +127,17 @@ uintptr_t VMStructs::readSymbol(const char* symbol_name) {
 void VMStructs::init(CodeCache* libjvm) {
     _libjvm = libjvm;
 
-    initOffsets();
-    initJvmFunctions();
+    if (!VM::isOpenJ9() && !VM::isZing()) {
+        initOffsets();
+        initJvmFunctions();
+    }
 }
 
 // Run when VM is initialized and JNI is available
 void VMStructs::ready() {
     resolveOffsets();
     patchSafeFetch();
-
-    JNIEnv* env = VM::jni();
-    initThreadBridge(env);
-    initLogging(env);
+    initThreadBridge();
 }
 
 void VMStructs::initOffsets() {
@@ -190,22 +193,24 @@ void VMStructs::initOffsets() {
             } else if (strcmp(type, "CompiledMethod") == 0 || strcmp(type, "nmethod") == 0) {
                 if (strcmp(field, "_method") == 0) {
                     _nmethod_method_offset = *(int*)(entry + offset_offset);
-                } else if (strcmp(field, "_verified_entry_point") == 0) {
+                } else if (strcmp(field, "_verified_entry_offset") == 0) {
                     _nmethod_entry_offset = *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_verified_entry_point") == 0) {
+                    _nmethod_entry_offset = - *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_state") == 0) {
                     _nmethod_state_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_comp_level") == 0) {
                     _nmethod_level_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_metadata_offset") == 0) {
                     _nmethod_metadata_offset = *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_immutable_data") == 0) {
+                    _nmethod_immutable_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_scopes_pcs_offset") == 0) {
-                    _nmethod_pcs_begin_offset = *(int*)(entry + offset_offset);
-                } else if (strcmp(field, "_dependencies_offset") == 0) {
-                    _nmethod_pcs_end_offset = *(int*)(entry + offset_offset);
-                } else if (strcmp(field, "_scopes_data_begin") == 0) {
-                    _scopes_begin_offset = *(int*)(entry + offset_offset);
+                    _scopes_pcs_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_scopes_data_offset") == 0) {
-                    _scopes_begin_offset = - *(int*)(entry + offset_offset);
+                    _scopes_data_offset = *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_scopes_data_begin") == 0) {
+                    _scopes_data_offset = - *(int*)(entry + offset_offset);
                 }
             } else if (strcmp(type, "Method") == 0) {
                 if (strcmp(field, "_constMethod") == 0) {
@@ -282,10 +287,12 @@ void VMStructs::initOffsets() {
                     _frame_size_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_frame_complete_offset") == 0) {
                     _frame_complete_offset = *(int*)(entry + offset_offset);
-                } else if (strcmp(field, "_code_begin") == 0) {
-                    _code_begin_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_code_offset") == 0) {
-                    _code_begin_offset = - *(int*)(entry + offset_offset);
+                    _code_offset = *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_code_begin") == 0) {
+                    _code_offset = - *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_data_offset") == 0) {
+                    _data_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_name") == 0) {
                     _nmethod_name_offset = *(int*)(entry + offset_offset);
                 }
@@ -307,6 +314,10 @@ void VMStructs::initOffsets() {
                 } else if (strcmp(field, "_log2_segment_size") == 0) {
                     _code_heap_segment_shift = *(int*)(entry + offset_offset);
                 }
+            } else if (strcmp(type, "HeapBlock::Header") == 0) {
+                if (strcmp(field, "_used") == 0) {
+                    _heap_block_used_offset = *(int*)(entry + offset_offset);
+                }
             } else if (strcmp(type, "VirtualSpace") == 0) {
                 if (strcmp(field, "_low_boundary") == 0) {
                     _vs_low_bound_offset = *(int*)(entry + offset_offset);
@@ -321,6 +332,10 @@ void VMStructs::initOffsets() {
                 if (strcmp(field, "_call_stub_return_address") == 0) {
                     _call_stub_return_addr = *(const void***)(entry + address_offset);
                 }
+            } else if (strcmp(type, "GrowableArrayBase") == 0 || strcmp(type, "GenericGrowableArray") == 0) {
+                if (strcmp(field, "_len") == 0) {
+                    _array_len_offset = *(int*)(entry + offset_offset);
+                }
             } else if (strcmp(type, "GrowableArray<int>") == 0) {
                 if (strcmp(field, "_data") == 0) {
                     _array_data_offset = *(int*)(entry + offset_offset);
@@ -330,6 +345,8 @@ void VMStructs::initOffsets() {
                     _flag_name_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_addr") == 0 || strcmp(field, "addr") == 0) {
                     _flag_addr_offset = *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_flags") == 0 || strcmp(field, "origin") == 0) {
+                    _flag_origin_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "flags") == 0) {
                     _flags_addr = **(char***)(entry + address_offset);
                 } else if (strcmp(field, "numFlags") == 0) {
@@ -391,14 +408,14 @@ void VMStructs::resolveOffsets() {
         _klass = (jfieldID)(uintptr_t)(*_klass_offset_addr << 2 | 2);
     }
 
-    char* ccp = (char*)JVMFlag::find("UseCompressedClassPointers");
-    if (ccp != NULL && *ccp && _narrow_klass_base_addr != NULL && _narrow_klass_shift_addr != NULL) {
+    JVMFlag* ccp = JVMFlag::find("UseCompressedClassPointers");
+    if (ccp != NULL && ccp->get() && _narrow_klass_base_addr != NULL && _narrow_klass_shift_addr != NULL) {
         _narrow_klass_base = *_narrow_klass_base_addr;
         _narrow_klass_shift = *_narrow_klass_shift_addr;
     }
 
-    char* coh = (char*)JVMFlag::find("UseCompactObjectHeaders");
-    if (coh != NULL && *coh) {
+    JVMFlag* coh = JVMFlag::find("UseCompactObjectHeaders");
+    if (coh != NULL && coh->get()) {
         _compact_object_headers = true;
     }
 
@@ -411,7 +428,7 @@ void VMStructs::resolveOffsets() {
 
     _has_method_structs = _jmethod_ids_offset >= 0
             && _nmethod_method_offset >= 0
-            && _nmethod_entry_offset >= 0
+            && _nmethod_entry_offset != -1
             && _nmethod_state_offset >= 0
             && _method_constmethod_offset >= 0
             && _method_code_offset >= 0
@@ -445,20 +462,25 @@ void VMStructs::resolveOffsets() {
         _call_stub_return = *_call_stub_return_addr;
     }
 
+    // Since JDK 23, _metadata_offset is relative to _data_offset. See metadata()
+    if (_nmethod_immutable_offset < 0) {
+        _data_offset = 0;
+    }
+
     _has_stack_structs = _has_method_structs
             && _interpreter_frame_bcp_offset != 0
-            && _code_begin_offset != -1
-            && _scopes_begin_offset != -1
+            && _code_offset != -1
+            && _data_offset >= 0
+            && _scopes_data_offset != -1
+            && _scopes_pcs_offset >= 0
             && _nmethod_metadata_offset >= 0
-            && _nmethod_pcs_begin_offset >= 0
-            && _nmethod_pcs_end_offset >= 0
             && _thread_vframe_offset >= 0
             && _thread_exception_offset >= 0
             && _constmethod_size >= 0;
 
     if (_code_heap_addr != NULL && _code_heap_low_addr != NULL && _code_heap_high_addr != NULL) {
         char* code_heaps = *_code_heap_addr;
-        unsigned int code_heap_count = *(unsigned int*)code_heaps;
+        unsigned int code_heap_count = *(unsigned int*)(code_heaps + _array_len_offset);
         if (code_heap_count <= 3 && _array_data_offset >= 0) {
             char* code_heap_array = *(char**)(code_heaps + _array_data_offset);
             memcpy(_code_heap, code_heap_array, code_heap_count * sizeof(_code_heap[0]));
@@ -476,7 +498,8 @@ void VMStructs::resolveOffsets() {
         _code_heap_segment_shift = *(int*)(_code_heap[0] + _code_heap_segment_shift);
     }
     if (_code_heap_memory_offset < 0 || _code_heap_segmap_offset < 0 ||
-        _code_heap_segment_shift < 0 || _code_heap_segment_shift > 16) {
+        _code_heap_segment_shift < 0 || _code_heap_segment_shift > 16 ||
+        _heap_block_used_offset < 0) {
         memset(_code_heap, 0, sizeof(_code_heap));
     }
 
@@ -487,9 +510,7 @@ void VMStructs::resolveOffsets() {
 }
 
 void VMStructs::initJvmFunctions() {
-    if (!VM::isOpenJ9() && !VM::isZing()) {
-        _get_stack_trace = (GetStackTraceFunc)_libjvm->findSymbolByPrefix("_ZN8JvmtiEnv13GetStackTraceEP10JavaThreadiiP");
-    }
+    _get_stack_trace = (GetStackTraceFunc)_libjvm->findSymbolByPrefix("_ZN8JvmtiEnv13GetStackTraceEP10JavaThreadiiP");
 
     if (VM::hotspot_version() == 8) {
         _lock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor28lock_without_safepoint_checkEv");
@@ -529,11 +550,13 @@ void VMStructs::initTLS(void* vm_thread) {
     }
 }
 
-void VMStructs::initThreadBridge(JNIEnv* env) {
+void VMStructs::initThreadBridge() {
     jthread thread;
     if (VM::jvmti()->GetCurrentThread(&thread) != 0) {
         return;
     }
+
+    JNIEnv* env = VM::jni();
 
     // Get eetop field - a bridge from Java Thread to VMThread
     jclass thread_class = env->FindClass("java/lang/Thread");
@@ -558,40 +581,8 @@ void VMStructs::initThreadBridge(JNIEnv* env) {
     }
 }
 
-void VMStructs::initLogging(JNIEnv* env) {
-    // Workaround for JDK-8238460
-    if (VM::hotspot_version() >= 15) {
-        VMManagement* management = VM::management();
-        if (management != NULL) {
-            jstring vm_log_str = env->NewStringUTF("VM.log list");
-            if (vm_log_str != NULL) {
-                jstring log_config = management->ExecuteDiagnosticCommand(env, vm_log_str);
-                if (log_config != NULL) {
-                    char cmd[128] = "VM.log what=jni+resolve=error decorators=";
-                    const char* s = env->GetStringUTFChars(log_config, NULL);
-                    if (s != NULL) {
-                        const char* p = strstr(s, "#0: ");
-                        if (p != NULL && (p = strchr(p + 4, ' ')) != NULL && (p = strchr(p + 1, ' ')) != NULL) {
-                            const char* q = p + 1;  // start of decorators
-                            while (*q > ' ') q++;
-                            if (q - p < sizeof(cmd) - 41) {
-                                memcpy(cmd + 41, p + 1, q - p - 1);
-                            }
-                        }
-                        env->ReleaseStringUTFChars(log_config, s);
-                    }
-                    if ((vm_log_str = env->NewStringUTF(cmd)) != NULL) {
-                        management->ExecuteDiagnosticCommand(env, vm_log_str);
-                    }
-                }
-            }
-        }
-        env->ExceptionClear();
-    }
-}
-
 VMThread* VMThread::current() {
-    return (VMThread*)pthread_getspecific((pthread_key_t)_tls_index);
+    return _tls_index >= 0 ? (VMThread*)pthread_getspecific((pthread_key_t)_tls_index) : NULL;
 }
 
 int VMThread::nativeThreadId(JNIEnv* jni, jthread thread) {
@@ -599,7 +590,7 @@ int VMThread::nativeThreadId(JNIEnv* jni, jthread thread) {
         VMThread* vm_thread = fromJavaThread(jni, thread);
         return vm_thread != NULL ? vm_thread->osThreadId() : -1;
     }
-    return J9Ext::GetOSThreadID(thread);
+    return VM::isOpenJ9() ? J9Ext::GetOSThreadID(thread) : -1;
 }
 
 jmethodID VMMethod::id() {
@@ -635,16 +626,16 @@ NMethod* CodeHeap::findNMethod(char* heap, const void* pc) {
         idx -= segmap[idx];
     }
 
-    unsigned char* block = heap_start + (idx << _code_heap_segment_shift);
-    return block[sizeof(size_t)] ? (NMethod*)(block + 2 * sizeof(size_t)) : NULL;
+    unsigned char* block = heap_start + (idx << _code_heap_segment_shift) + _heap_block_used_offset;
+    return *block ? align<NMethod*>(block + sizeof(uintptr_t)) : NULL;
 }
 
-void* JVMFlag::find(const char* name) {
+JVMFlag* JVMFlag::find(const char* name) {
     if (_flags_addr != NULL && _flag_size > 0) {
         for (int i = 0; i < _flag_count; i++) {
             JVMFlag* f = (JVMFlag*)(_flags_addr + i * _flag_size);
-            if (f->name() != NULL && strcmp(f->name(), name) == 0) {
-                return f->addr();
+            if (f->name() != NULL && strcmp(f->name(), name) == 0 && f->addr() != NULL) {
+                return f;
             }
         }
     }
@@ -657,8 +648,9 @@ int NMethod::findScopeOffset(const void* pc) {
         return -1;
     }
 
-    PcDesc* pcd = (PcDesc*) at(*(int*) at(_nmethod_pcs_begin_offset));
-    PcDesc* pcd_end = (PcDesc*) at(*(int*) at(_nmethod_pcs_end_offset));
+    const int* scopes_pcs = (const int*) at(_scopes_pcs_offset);
+    PcDesc* pcd = (PcDesc*) immutableDataAt(scopes_pcs[0]);
+    PcDesc* pcd_end = (PcDesc*) immutableDataAt(scopes_pcs[1]);
     int low = 0;
     int high = (pcd_end - pcd) - 1;
 

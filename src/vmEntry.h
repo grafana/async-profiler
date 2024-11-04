@@ -40,7 +40,8 @@ enum ASGCT_CallFrameType {
     BCI_LOCK                = -14,  // class name of the locked object
     BCI_PARK                = -15,  // class name of the park() blocker
     BCI_THREAD_ID           = -16,  // method_id designates a thread
-    BCI_ERROR               = -17,  // method_id is an error string
+    BCI_ADDRESS             = -17,  // method_id is a PC address
+    BCI_ERROR               = -18,  // method_id is an error string
 };
 
 // See hotspot/src/share/vm/prims/forte.cpp
@@ -73,13 +74,6 @@ typedef struct {
 
 typedef void (*AsyncGetCallTrace)(ASGCT_CallTrace*, jint, void*);
 
-typedef struct {
-    void* unused[38];
-    jstring (JNICALL *ExecuteDiagnosticCommand)(JNIEnv*, jstring);
-} VMManagement;
-
-typedef VMManagement* (*JVM_GetManagement)(jint);
-
 typedef jlong (*JVM_MemoryFunc)();
 
 typedef struct {
@@ -98,7 +92,6 @@ class VM {
     static int _hotspot_version;
     static bool _openj9;
     static bool _zing;
-    static bool _can_sample_objects;
 
     static jvmtiError (JNICALL *_orig_RedefineClasses)(jvmtiEnv*, jint, const jvmtiClassDefinition*);
     static jvmtiError (JNICALL *_orig_RetransformClasses)(jvmtiEnv*, jint, const jclass* classes);
@@ -110,7 +103,6 @@ class VM {
 
   public:
     static AsyncGetCallTrace _asyncGetCallTrace;
-    static JVM_GetManagement _getManagement;
     static JVM_MemoryFunc _totalMemory;
     static JVM_MemoryFunc _freeMemory;
 
@@ -126,7 +118,7 @@ class VM {
 
     static JNIEnv* jni() {
         JNIEnv* jni;
-        return _vm->GetEnv((void**)&jni, JNI_VERSION_1_6) == 0 ? jni : NULL;
+        return _vm && _vm->GetEnv((void**)&jni, JNI_VERSION_1_6) == 0 ? jni : NULL;
     }
 
     static JNIEnv* attachThread(const char* name) {
@@ -137,10 +129,6 @@ class VM {
 
     static void detachThread() {
         _vm->DetachCurrentThread();
-    }
-
-    static VMManagement* management() {
-        return _getManagement != NULL ? _getManagement(0x20030000) : NULL;
     }
 
     static int hotspot_version() {
@@ -155,8 +143,16 @@ class VM {
         return _zing;
     }
 
-    static bool canSampleObjects() {
-        return _can_sample_objects;
+    static bool addSampleObjectsCapability() {
+        jvmtiCapabilities capabilities = {0};
+        capabilities.can_generate_sampled_object_alloc_events = 1;
+        return _jvmti->AddCapabilities(&capabilities) == 0;
+    }
+
+    static void releaseSampleObjectsCapability() {
+        jvmtiCapabilities capabilities = {0};
+        capabilities.can_generate_sampled_object_alloc_events = 1;
+        _jvmti->RelinquishCapabilities(&capabilities);
     }
 
     static void JNICALL VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread);

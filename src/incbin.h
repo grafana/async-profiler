@@ -10,13 +10,13 @@
 #  define INCBIN_SECTION ".const_data"
 #  define INCBIN_SYMBOL  "_"
 #else
-#  define INCBIN_SECTION ".section \".rodata\", \"a\", @progbits"
+#  define INCBIN_SECTION ".section \".rodata\", \"a\""
 #  define INCBIN_SYMBOL
 #endif
 
 #define INCBIN(NAME, FILE) \
-    extern const char NAME[];\
-    extern const char NAME##_END[];\
+    extern "C" const char NAME[];\
+    extern "C" const char NAME##_END[];\
     asm(INCBIN_SECTION "\n"\
         ".global " INCBIN_SYMBOL #NAME "\n"\
         INCBIN_SYMBOL #NAME ":\n"\
@@ -28,5 +28,9 @@
     );
 
 #define INCBIN_SIZEOF(NAME) (NAME##_END - NAME)
+
+#define INCLUDE_HELPER_CLASS(NAME_VAR, DATA_VAR, NAME) \
+    static const char* const NAME_VAR = NAME;\
+    INCBIN(DATA_VAR, "src/helper/" NAME ".class")
 
 #endif // _INCBIN_H

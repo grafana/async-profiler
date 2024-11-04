@@ -16,11 +16,49 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <link.h>
 #include <linux/limits.h>
 #include "symbols.h"
 #include "dwarf.h"
 #include "fdtransferClient.h"
 #include "log.h"
+
+
+#ifdef __x86_64__
+
+#include <poll.h>
+#include "vmEntry.h"
+
+// Workaround for JDK-8312065 on JDK 8:
+// replace poll() implementation with ppoll() which is restartable
+static int poll_hook(struct pollfd* fds, nfds_t nfds, int timeout) {
+    if (timeout >= 0) {
+        struct timespec ts;
+        ts.tv_sec = timeout / 1000;
+        ts.tv_nsec = (timeout % 1000) * 1000000;
+        return ppoll(fds, nfds, &ts, NULL);
+    } else {
+        return ppoll(fds, nfds, NULL, NULL);
+    }
+}
+
+static void applyPatch(CodeCache* cc) {
+    static bool patch_libnet = VM::hotspot_version() == 8;
+
+    if (patch_libnet) {
+        size_t len = strlen(cc->name());
+        if (len >= 10 && strcmp(cc->name() + len - 10, "/libnet.so") == 0) {
+            cc->patchImport(im_poll, (void*)poll_hook);
+            patch_libnet = false;
+        }
+    }
+}
+
+#else
+
+static void applyPatch(CodeCache* cc) {}
+
+#endif
 
 
 class SymbolDesc {
@@ -129,6 +167,7 @@ typedef Elf32_Dyn  ElfDyn;
 
 
 static bool musl = false;
+static char _debuginfod_cache_buf[PATH_MAX] = {0};
 
 class ElfParser {
   private:
@@ -168,6 +207,10 @@ class ElfParser {
         return _header->e_type == ET_EXEC ? (const char*)pheader->p_vaddr : _vaddr_diff + pheader->p_vaddr;
     }
 
+    const char* base() {
+        return _header->e_type == ET_EXEC ? NULL : _base;
+    }
+
     char* dyn_ptr(ElfDyn* dyn) {
         // GNU dynamic linker relocates pointers in the dynamic section, while musl doesn't.
         // Also, [vdso] is not relocated, and its vaddr may differ from the load address.
@@ -186,10 +229,13 @@ class ElfParser {
     void parseDwarfInfo();
     uint32_t getSymbolCount(uint32_t* gnu_hash);
     void loadSymbols(bool use_debug);
+    bool loadSymbolsFromDebug(const char* build_id, const int build_id_len);
+    bool loadSymbolsFromDebuginfodCache(const char* build_id, const int build_id_len);
     bool loadSymbolsUsingBuildId();
     bool loadSymbolsUsingDebugLink();
     void loadSymbolTable(const char* symbols, size_t total_size, size_t ent_size, const char* strings);
     void addRelocationSymbols(ElfSection* reltab, const char* plt);
+    const char* getDebuginfodCache();
 
   public:
     static void parseProgramHeaders(CodeCache* cc, const char* base, const char* end, bool relocate_dyn);
@@ -231,7 +277,7 @@ bool ElfParser::parseFile(CodeCache* cc, const char* base, const char* file_name
         return false;
     }
 
-    size_t length = (size_t)lseek64(fd, 0, SEEK_END);
+    size_t length = (size_t)lseek(fd, 0, SEEK_END);
     void* addr = mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
 
@@ -330,21 +376,22 @@ void ElfParser::parseDynamicSection() {
             }
         }
 
-        if (symtab == NULL || strtab == NULL || syment == 0 || nsyms == 0 || relent == 0) {
+        if (symtab == NULL || strtab == NULL || syment == 0 || relent == 0) {
             return;
         }
 
-        if (!_cc->hasDebugSymbols()) {
+        if (!_cc->hasDebugSymbols() && nsyms > 0) {
             loadSymbolTable(symtab, syment * nsyms, syment, strtab);
         }
 
+        const char* base = this->base();
         if (jmprel != NULL && pltrelsz != 0) {
             // Parse .rela.plt table
             for (size_t offs = 0; offs < pltrelsz; offs += relent) {
                 ElfRelocation* r = (ElfRelocation*)(jmprel + offs);
                 ElfSymbol* sym = (ElfSymbol*)(symtab + ELF_R_SYM(r->r_info) * syment);
                 if (sym->st_name != 0) {
-                    _cc->addImport((void**)(_base + r->r_offset), strtab + sym->st_name);
+                    _cc->addImport((void**)(base + r->r_offset), strtab + sym->st_name);
                 }
             }
         } else if (rel != NULL && relsz != 0) {
@@ -355,7 +402,7 @@ void ElfParser::parseDynamicSection() {
                 if (ELF_R_TYPE(r->r_info) == R_GLOB_DAT) {
                     ElfSymbol* sym = (ElfSymbol*)(symtab + ELF_R_SYM(r->r_info) * syment);
                     if (sym->st_name != 0) {
-                        _cc->addImport((void**)(_base + r->r_offset), strtab + sym->st_name);
+                        _cc->addImport((void**)(base + r->r_offset), strtab + sym->st_name);
                     }
                }
             }
@@ -420,7 +467,68 @@ void ElfParser::loadSymbols(bool use_debug) {
     }
 }
 
-// Load symbols from /usr/lib/debug/.build-id/ab/cdef1234.debug, where abcdef1234 is Build ID
+const char* ElfParser::getDebuginfodCache() {
+    if (_debuginfod_cache_buf[0]) {
+        return _debuginfod_cache_buf;
+    }
+
+    const char* env_vars[] = {"DEBUGINFOD_CACHE_PATH", "XDG_CACHE_HOME", "HOME"};
+    const char* suffixes[] = {"/", "debuginfod_client/", ".cache/debuginfod_client/"};
+
+    for (int i = 0; i < sizeof(env_vars) / sizeof(env_vars[0]); i++) {
+        const char* env_val = getenv(env_vars[i]);
+        if (!env_val || !env_val[0]) {
+            continue;
+        }
+
+        if (snprintf(_debuginfod_cache_buf, sizeof(_debuginfod_cache_buf), "%s/%s", env_val, suffixes[i]) < sizeof(_debuginfod_cache_buf)) {
+            return _debuginfod_cache_buf;
+        }
+    }
+
+    _debuginfod_cache_buf[0] = '\0';
+    return _debuginfod_cache_buf;
+}
+
+bool ElfParser::loadSymbolsFromDebug(const char* build_id, const int build_id_len) {
+    char path[PATH_MAX];
+    char* p = path + snprintf(path, sizeof(path), "/usr/lib/debug/.build-id/%02hhx/", build_id[0]);
+    for (int i = 1; i < build_id_len; i++) {
+        p += snprintf(p, 3, "%02hhx", build_id[i]);
+    }
+    strcpy(p, ".debug");
+
+    return parseFile(_cc, _base, path, false);
+}
+
+bool ElfParser::loadSymbolsFromDebuginfodCache(const char* build_id, const int build_id_len) {
+    const char* debuginfod_cache = getDebuginfodCache();
+    if (debuginfod_cache == NULL || !debuginfod_cache[0]) {
+        return false;
+    }
+
+    char path[PATH_MAX];
+    const int debuginfod_cache_len = strlen(debuginfod_cache);
+    if (debuginfod_cache_len + build_id_len + strlen("/debuginfo") >= sizeof(path)) {
+        Log::warn("Path too long, skipping loading symbols: %s", debuginfod_cache);
+        return false;
+    }
+
+    char* p = strcpy(path, debuginfod_cache);
+    p += debuginfod_cache_len;
+    for (int i = 0; i < build_id_len; i++) {
+        p += snprintf(p, 3, "%02hhx", build_id[i]);
+    }
+    strcpy(p, "/debuginfo");
+
+    return parseFile(_cc, _base, path, false);
+}
+
+// Load symbols from the first file that exists in the following locations, in order, where abcdef1234 is Build ID.
+//   /usr/lib/debug/.build-id/ab/cdef1234.debug
+//   $DEBUGINFOD_CACHE_PATH/abcdef1234/debuginfo
+//   $XDG_CACHE_HOME/debuginfod_client/abcdef1234/debuginfo
+//   $HOME/.cache/debuginfod_client/abcdef1234/debuginfo
 bool ElfParser::loadSymbolsUsingBuildId() {
     ElfSection* section = findSection(SHT_NOTE, ".note.gnu.build-id");
     if (section == NULL || section->sh_size <= 16) {
@@ -435,14 +543,8 @@ bool ElfParser::loadSymbolsUsingBuildId() {
     const char* build_id = (const char*)note + sizeof(*note) + 4;
     int build_id_len = note->n_descsz;
 
-    char path[PATH_MAX];
-    char* p = path + snprintf(path, sizeof(path), "/usr/lib/debug/.build-id/%02hhx/", build_id[0]);
-    for (int i = 1; i < build_id_len; i++) {
-        p += snprintf(p, 3, "%02hhx", build_id[i]);
-    }
-    strcpy(p, ".debug");
-
-    return parseFile(_cc, _base, path, false);
+    return loadSymbolsFromDebug(build_id, build_id_len)
+        || loadSymbolsFromDebuginfodCache(build_id, build_id_len);
 }
 
 // Look for debuginfo file specified in .gnu_debuglink section
@@ -487,12 +589,13 @@ bool ElfParser::loadSymbolsUsingDebugLink() {
 }
 
 void ElfParser::loadSymbolTable(const char* symbols, size_t total_size, size_t ent_size, const char* strings) {
+    const char* base = this->base();
     for (const char* symbols_end = symbols + total_size; symbols < symbols_end; symbols += ent_size) {
         ElfSymbol* sym = (ElfSymbol*)symbols;
         if (sym->st_name != 0 && sym->st_value != 0) {
             // Skip special AArch64 mapping symbols: $x and $d
             if (sym->st_size != 0 || sym->st_info != 0 || strings[sym->st_name] != '$') {
-                _cc->add(_base + sym->st_value, (int)sym->st_size, strings + sym->st_name);
+                _cc->add(base + sym->st_value, (int)sym->st_size, strings + sym->st_name);
             }
         }
     }
@@ -576,33 +679,17 @@ void Symbols::parseKernelSymbols(CodeCache* cc) {
     fclose(f);
 }
 
-void Symbols::parseLibraries(CodeCacheArray* array, bool kernel_symbols) {
-    MutexLocker ml(_parse_lock);
-
-    if (array->count() == 0) {
-        // _CS_GNU_LIBC_VERSION is not defined on musl
-        musl = confstr(_CS_GNU_LIBC_VERSION, NULL, 0) == 0 && errno != 0;
-    }
-
-    if (kernel_symbols && !haveKernelSymbols()) {
-        CodeCache* cc = new CodeCache("[kernel]");
-        parseKernelSymbols(cc);
-
-        if (haveKernelSymbols()) {
-            cc->sort();
-            array->add(cc);
-        } else {
-            delete cc;
-        }
-    }
-
+static int parseLibrariesCallback(struct dl_phdr_info* info, size_t size, void* data) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (f == NULL) {
-        return;
+        return 1;
     }
 
+    CodeCacheArray* array = (CodeCacheArray*)data;
+    CodeCache* cc;
     const char* image_base = NULL;
     u64 last_inode = 0;
+    u64 cc_inode = 0;
     char* str = NULL;
     size_t str_size = 0;
     ssize_t len;
@@ -628,42 +715,76 @@ void Symbols::parseLibraries(CodeCacheArray* array, bool kernel_symbols) {
             continue;
         }
 
+        const char* map_end = map.end();
+        u64 inode = u64(map.dev()) << 32 | map.inode();
+        if (inode != 0 && !_parsed_inodes.insert(inode).second) {
+            // Do not parse the same executable twice
+            if (inode == cc_inode) {
+                cc->updateBounds(map_start, map_end);
+            }
+            continue;
+        }
+
         int count = array->count();
         if (count >= MAX_NATIVE_LIBS) {
             break;
         }
 
-        const char* map_end = map.end();
-        CodeCache* cc = new CodeCache(map.file(), count, false, map_start, map_end);
+        cc = new CodeCache(map.file(), count, false, map_start, map_end);
+        cc_inode = inode;
 
-        // Do not try to parse pseudofiles like anon_inode:name, /memfd:name
-        if (strchr(map.file(), ':') == NULL) {
-            u64 inode = u64(map.dev()) << 32 | map.inode();
-            if (inode != 0) {
-                // Do not parse the same executable twice, e.g. on Alpine Linux
-                if (_parsed_inodes.insert(inode).second) {
-                    if (inode == last_inode) {
-                        // If last_inode is set, image_base is known to be valid and readable
-                        ElfParser::parseFile(cc, image_base, map.file(), true);
-                        // Parse program headers after the file to ensure debug symbols are parsed first
-                        ElfParser::parseProgramHeaders(cc, image_base, map_end, musl);
-                    } else if ((unsigned long)map_start > map_offs) {
-                        // Unlikely case when image_base has not been found.
-                        // Be careful: executable file is not always ELF, e.g. classes.jsa
-                        ElfParser::parseFile(cc, map_start - map_offs, map.file(), true);
-                    }
-                }
-            } else if (strcmp(map.file(), "[vdso]") == 0) {
-                ElfParser::parseProgramHeaders(cc, map_start, map_end, true);
+        if (strchr(map.file(), ':') != NULL) {
+            // Do not try to parse pseudofiles like anon_inode:name, /memfd:name
+        } else if (inode != 0) {
+            if (inode == last_inode) {
+                // If last_inode is set, image_base is known to be valid and readable
+                ElfParser::parseFile(cc, image_base, map.file(), true);
+                // Parse program headers after the file to ensure debug symbols are parsed first
+                ElfParser::parseProgramHeaders(cc, image_base, map_end, musl);
+            } else if ((unsigned long)map_start > map_offs) {
+                // Unlikely case when image_base has not been found.
+                // Be careful: executable file is not always ELF, e.g. classes.jsa
+                ElfParser::parseFile(cc, map_start - map_offs, map.file(), true);
             }
+        } else if (strcmp(map.file(), "[vdso]") == 0) {
+            ElfParser::parseProgramHeaders(cc, map_start, map_end, true);
         }
 
         cc->sort();
+        applyPatch(cc);
         array->add(cc);
     }
 
     free(str);
     fclose(f);
+
+    return 1;
+}
+
+void Symbols::parseLibraries(CodeCacheArray* array, bool kernel_symbols) {
+    MutexLocker ml(_parse_lock);
+
+    if (array->count() == 0) {
+        // _CS_GNU_LIBC_VERSION is not defined on musl
+        musl = confstr(_CS_GNU_LIBC_VERSION, NULL, 0) == 0 && errno != 0;
+    }
+
+    if (kernel_symbols && !haveKernelSymbols()) {
+        CodeCache* cc = new CodeCache("[kernel]");
+        parseKernelSymbols(cc);
+
+        if (haveKernelSymbols()) {
+            cc->sort();
+            array->add(cc);
+        } else {
+            delete cc;
+        }
+    }
+
+    // In glibc, dl_iterate_phdr() holds dl_load_write_lock, therefore preventing
+    // concurrent loading and unloading of shared libraries.
+    // Without it, we may access memory of a library that is being unloaded.
+    dl_iterate_phdr(parseLibrariesCallback, array);
 }
 
 #endif // __linux__
