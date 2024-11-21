@@ -4,7 +4,6 @@
  */
 
 #include <algorithm>
-#include <fstream>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -91,6 +90,16 @@ static bool sortByCounter(const NamedMethodSample& a, const NamedMethodSample& b
 }
 
 
+static inline int hasNativeStack(EventType event_type) {
+    const int events_with_native_stack =
+        (1 << PERF_SAMPLE)       |
+        (1 << EXECUTION_SAMPLE)  |
+        (1 << WALL_CLOCK_SAMPLE) |
+        (1 << ALLOC_SAMPLE)      |
+        (1 << ALLOC_OUTSIDE_TLAB);
+    return (1 << event_type) & events_with_native_stack;
+}
+
 static inline bool isVTableStub(const char* name) {
     return name[0] && strcmp(name + 1, "table stub") == 0;
 }
@@ -156,7 +165,7 @@ void Profiler::onThreadEnd(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
 
 void Profiler::onGarbageCollectionFinish() {
     // Called during GC pause, do not use JNI
-    __sync_fetch_and_add(&_gc_id, 1);
+    atomicInc(_gc_id);
 }
 
 const char* Profiler::asgctError(int code) {
@@ -323,10 +332,6 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
     const void* callchain[MAX_NATIVE_FRAMES];
     int native_frames;
 
-    if (_cstack == CSTACK_NO || (event_type > EXECUTION_SAMPLE && _cstack == CSTACK_DEFAULT)) {
-        return 0;
-    }
-
     // Use PerfEvents stack walker for execution samples, or basic stack walker for other events
     if (event_type == PERF_SAMPLE) {
         native_frames = PerfEvents::walk(tid, ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
@@ -338,10 +343,10 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
         native_frames = StackWalker::walkFP(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
     }
 
-    return convertNativeTrace(native_frames, callchain, frames);
+    return convertNativeTrace(native_frames, callchain, frames, event_type);
 }
 
-int Profiler::convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames) {
+int Profiler::convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type) {
     int depth = 0;
     jmethodID prev_method = NULL;
 
@@ -349,7 +354,11 @@ int Profiler::convertNativeTrace(int native_frames, const void** callchain, ASGC
         const char* current_method_name = findNativeMethod(callchain[i]);
         char mark;
         if (current_method_name != NULL && (mark = NativeFunc::mark(current_method_name)) != 0) {
-            if (mark == MARK_INTERPRETER) {
+            if (mark == MARK_VM_RUNTIME && event_type >= ALLOC_SAMPLE) {
+                // Skip all internal frames above VM runtime entry for allocation samples
+                depth = 0;
+                continue;
+            } else if (mark == MARK_INTERPRETER) {
                 // This is C++ interpreter frame, this and later frames should be reported
                 // as Java frames returned by AGCT. Terminate the scan here.
                 return depth;
@@ -644,18 +653,28 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     jvmtiFrameInfo* jvmti_frames = _calltrace_buffer[lock_index]->_jvmti_frames;
 
     int num_frames = 0;
-    if (_add_event_frame && event_type >= ALLOC_SAMPLE && event->id()) {
-        // Convert event_type to frame_type, e.g. ALLOC_SAMPLE -> BCI_ALLOC
-        jint frame_type = BCI_ALLOC - (event_type - ALLOC_SAMPLE);
-        num_frames = makeFrame(frames, frame_type, event->id());
+    if (_add_event_frame && event_type >= ALLOC_SAMPLE && event_type <= PARK_SAMPLE) {
+        u32 class_id = ((EventWithClassId*)event)->_class_id;
+        if (class_id != 0) {
+            // Convert event_type to frame_type, e.g. ALLOC_SAMPLE -> BCI_ALLOC
+            jint frame_type = BCI_ALLOC - (event_type - ALLOC_SAMPLE);
+            num_frames = makeFrame(frames, frame_type, class_id);
+        }
     }
 
     StackContext java_ctx = {0};
-    num_frames += getNativeTrace(ucontext, frames + num_frames, event_type, tid, &java_ctx);
+    if (hasNativeStack(event_type)) {
+        if (_features.pc_addr && event_type <= WALL_CLOCK_SAMPLE) {
+            num_frames += makeFrame(frames + num_frames, BCI_ADDRESS, StackFrame(ucontext).pc());
+        }
+        if (_cstack != CSTACK_NO) {
+            num_frames += getNativeTrace(ucontext, frames + num_frames, event_type, tid, &java_ctx);
+        }
+    }
 
     if (_cstack == CSTACK_VM) {
         num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth);
-    } else if (event_type <= EXECUTION_SAMPLE) {
+    } else if (event_type <= WALL_CLOCK_SAMPLE) {
         // Async events
         int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
         if (java_frames > 0 && java_ctx.pc != NULL && VMStructs::hasMethodStructs()) {
@@ -725,8 +744,8 @@ void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, 
     _locks[lock_index].unlock();
 }
 
-void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id) {
-    _call_trace_storage.add(call_trace_id, counter);
+void Profiler::recordExternalSamples(u64 samples, u64 counter, int tid, u32 call_trace_id, EventType event_type, Event* event) {
+    _call_trace_storage.add(call_trace_id, samples, counter);
 
     u32 lock_index = getLockIndex(tid);
     if (!_locks[lock_index].tryLock() &&
@@ -758,6 +777,15 @@ void Profiler::recordEventOnly(EventType event_type, Event* event) {
     _jfr.recordEvent(lock_index, tid, 0, event_type, event);
 
     _locks[lock_index].unlock();
+}
+
+void Profiler::tryResetCounters() {
+    // Reset counters only for non-JFR recording, otherwise resetting may cause missing stack traces for some
+    // allocation events and skewed incorrect number of samples.
+    // In JFR recording, each sample is recorded individually, so accumulated counters are not actually used.
+    if (!_jfr.active()) {
+        _call_trace_storage.resetCounters();
+    }
 }
 
 void Profiler::writeLog(LogLevel level, const char* message) {
@@ -933,7 +961,8 @@ void Profiler::updateNativeThreadNames() {
         ThreadList* thread_list = OS::listThreads();
         char name_buf[64];
 
-        for (int tid; (tid = thread_list->next()) != -1; ) {
+        while (thread_list->hasNext()) {
+            int tid = thread_list->next();
             MutexLocker ml(_thread_names_lock);
             std::map<int, std::string>::iterator it = _thread_names.lower_bound(tid);
             if (it == _thread_names.end() || it->first != tid) {
@@ -972,9 +1001,19 @@ Engine* Profiler::selectEngine(const char* event_name) {
     if (event_name == NULL) {
         return &noop_engine;
     } else if (strcmp(event_name, EVENT_CPU) == 0) {
-        return PerfEvents::supported() ? (Engine*)&perf_events : (Engine*)&wall_clock;
+        if (PerfEvents::supported()) {
+            return &perf_events;
+        } else if (CTimer::supported()) {
+            return &ctimer;
+        } else {
+            return &wall_clock;
+        }
     } else if (strcmp(event_name, EVENT_WALL) == 0) {
-        return VM::isOpenJ9() ? (Engine*)&j9_wall_clock : (Engine*)&wall_clock;
+        if (VM::isOpenJ9()) {
+            return &j9_wall_clock;
+        } else {
+            return &wall_clock;
+        }
     } else if (strcmp(event_name, EVENT_CTIMER) == 0) {
         return &ctimer;
     } else if (strcmp(event_name, EVENT_ITIMER) == 0) {
@@ -987,7 +1026,7 @@ Engine* Profiler::selectEngine(const char* event_name) {
 }
 
 Engine* Profiler::selectAllocEngine(long alloc_interval, bool live) {
-    if (VM::canSampleObjects()) {
+    if (VM::addSampleObjectsCapability()) {
         return &object_sampler;
     } else if (VM::isOpenJ9()) {
         return &j9_object_sampler;
@@ -1128,15 +1167,12 @@ Error Profiler::start(Arguments& args, bool reset) {
         return Error("DWARF unwinding is not supported on this platform");
     } else if (_cstack == CSTACK_LBR && _engine != &perf_events) {
         return Error("Branch stack is supported only with PMU events");
-    } else if (_cstack == CSTACK_VM) {
-        if (!VMStructs::hasStackStructs()) {
-            return Error("VMStructs stack walking is not supported on this JVM/platform");
-        }
-        Log::info("cstack=vm is an experimental option, use with care");
+    } else if (_cstack == CSTACK_VM && !VMStructs::hasStackStructs()) {
+        return Error("VMStructs stack walking is not supported on this JVM/platform");
     }
 
     // Kernel symbols are useful only for perf_events without --all-user
-    updateSymbols(_engine == &perf_events && args._ring != RING_USER);
+    updateSymbols(_engine == &perf_events && !args._alluser);
 
     error = installTraps(args._begin, args._end);
     if (error) {
@@ -1314,7 +1350,7 @@ Error Profiler::flushJfr() {
     return Error::OK;
 }
 
-Error Profiler::dump(std::ostream& out, Arguments& args) {
+Error Profiler::dump(Writer& out, Arguments& args) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE && _state != RUNNING) {
         return Error("Profiler has not started");
@@ -1352,9 +1388,10 @@ Error Profiler::dump(std::ostream& out, Arguments& args) {
     return Error::OK;
 }
 
-void Profiler::printUsedMemory(std::ostream& out) {
+void Profiler::printUsedMemory(Writer& out) {
     size_t call_trace_storage = _call_trace_storage.usedMemory();
-    size_t dictionaries = _class_map.usedMemory() + _symbol_map.usedMemory() + _thread_filter.usedMemory() + _jfr.usedMemory();
+    size_t flight_recording = _jfr.usedMemory();
+    size_t dictionaries = _class_map.usedMemory() + _symbol_map.usedMemory() + _thread_filter.usedMemory();
 
     size_t code_cache = _runtime_stubs.usedMemory();
     int native_lib_count = _native_libs.count();
@@ -1367,12 +1404,13 @@ void Profiler::printUsedMemory(std::ostream& out) {
     const size_t KB = 1024;
     snprintf(buf, sizeof(buf) - 1,
              "Call trace storage: %7zu KB\n"
+             "  Flight recording: %7zu KB\n"
              "      Dictionaries: %7zu KB\n"
              "        Code cache: %7zu KB\n"
              "------------------------------\n"
              "             Total: %7zu KB\n",
-             call_trace_storage / KB, dictionaries / KB, code_cache / KB,
-             (call_trace_storage + dictionaries + code_cache) / KB);
+             call_trace_storage / KB, flight_recording / KB, dictionaries / KB, code_cache / KB,
+             (call_trace_storage + flight_recording + dictionaries + code_cache) / KB);
     out << buf;
 }
 
@@ -1395,10 +1433,10 @@ void Profiler::switchThreadEvents(jvmtiEventMode mode) {
 
 /*
  * Dump stacks in FlameGraph input format:
- * 
+ *
  * <frame>;<frame>;...;<topmost frame> <count>
  */
-void Profiler::dumpCollapsed(std::ostream& out, Arguments& args) {
+void Profiler::dumpCollapsed(Writer& out, Arguments& args) {
     FrameName fn(args, args._style | STYLE_NO_SEMICOLON, _epoch, _thread_names_lock, _thread_names);
     char buf[32];
 
@@ -1425,7 +1463,7 @@ void Profiler::dumpCollapsed(std::ostream& out, Arguments& args) {
     }
 }
 
-void Profiler::dumpFlameGraph(std::ostream& out, Arguments& args, bool tree) {
+void Profiler::dumpFlameGraph(Writer& out, Arguments& args, bool tree) {
     char title[64];
     if (args._title == NULL) {
         Engine* active_engine = activeEngine();
@@ -1485,7 +1523,7 @@ void Profiler::dumpFlameGraph(std::ostream& out, Arguments& args, bool tree) {
     flamegraph.dump(out, tree);
 }
 
-void Profiler::dumpText(std::ostream& out, Arguments& args) {
+void Profiler::dumpText(Writer& out, Arguments& args) {
     FrameName fn(args, args._style | STYLE_DOTTED, _epoch, _thread_names_lock, _thread_names);
     char buf[1024] = {0};
 
@@ -1529,7 +1567,9 @@ void Profiler::dumpText(std::ostream& out, Arguments& args) {
 
     // Print top call stacks
     if (args._dump_traces > 0) {
-        std::sort(samples.begin(), samples.end());
+        std::sort(samples.begin(), samples.end(), [](const CallTraceSample& a, const CallTraceSample& b) {
+            return a.counter > b.counter;
+        });
 
         int max_count = args._dump_traces;
         for (std::vector<CallTraceSample>::const_iterator it = samples.begin(); it != samples.end() && --max_count >= 0; ++it) {
@@ -1675,7 +1715,7 @@ void Profiler::timerLoop(void* timer_id) {
     }
 }
 
-Error Profiler::runInternal(Arguments& args, std::ostream& out) {
+Error Profiler::runInternal(Arguments& args, Writer& out) {
     switch (args._action) {
         case ACTION_START:
         case ACTION_RESUME: {
@@ -1742,8 +1782,7 @@ Error Profiler::runInternal(Arguments& args, std::ostream& out) {
 
             if (PerfEvents::supported()) {
                 out << "Perf events:\n";
-                // The first perf event is "cpu" which is already printed
-                for (int event_id = 1; ; event_id++) {
+                for (int event_id = 0; ; event_id++) {
                     const char* event_name = PerfEvents::getEventName(event_id);
                     if (event_name == NULL) break;
                     out << "  " << event_name << "\n";
@@ -1753,7 +1792,6 @@ Error Profiler::runInternal(Arguments& args, std::ostream& out) {
         }
         case ACTION_VERSION:
             out << PROFILER_VERSION;
-            out.flush();
             break;
         default:
             break;
@@ -1763,17 +1801,16 @@ Error Profiler::runInternal(Arguments& args, std::ostream& out) {
 
 Error Profiler::run(Arguments& args) {
     if (!args.hasOutputFile()) {
-        return runInternal(args, std::cout);
+        LogWriter out;
+        return runInternal(args, out);
     } else {
         // Open output file under the lock to avoid races with background timer
         MutexLocker ml(_state_lock);
-        std::ofstream out(args.file(), std::ios::out | std::ios::trunc);
+        FileWriter out(args.file());
         if (!out.is_open()) {
             return Error("Could not open output file");
         }
-        Error error = runInternal(args, out);
-        out.close();
-        return error;
+        return runInternal(args, out);
     }
 }
 
@@ -1786,12 +1823,11 @@ Error Profiler::restart(Arguments& args) {
     }
 
     if (args._file != NULL && args._output != OUTPUT_NONE && args._output != OUTPUT_JFR) {
-        std::ofstream out(args.file(), std::ios::out | std::ios::trunc);
+        FileWriter out(args.file());
         if (!out.is_open()) {
             return Error("Could not open output file");
         }
         error = dump(out, args);
-        out.close();
         if (error) {
             return error;
         }

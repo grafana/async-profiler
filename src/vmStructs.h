@@ -50,32 +50,36 @@ class VMStructs {
     static int _anchor_fp_offset;
     static int _frame_size_offset;
     static int _frame_complete_offset;
-    static int _code_begin_offset;
-    static int _scopes_begin_offset;
+    static int _code_offset;
+    static int _data_offset;
+    static int _scopes_pcs_offset;
+    static int _scopes_data_offset;
     static int _nmethod_name_offset;
     static int _nmethod_method_offset;
     static int _nmethod_entry_offset;
     static int _nmethod_state_offset;
     static int _nmethod_level_offset;
     static int _nmethod_metadata_offset;
-    static int _nmethod_pcs_begin_offset;
-    static int _nmethod_pcs_end_offset;
+    static int _nmethod_immutable_offset;
     static int _method_constmethod_offset;
     static int _method_code_offset;
     static int _constmethod_constants_offset;
     static int _constmethod_idnum_offset;
     static int _constmethod_size;
     static int _pool_holder_offset;
+    static int _array_len_offset;
     static int _array_data_offset;
     static int _code_heap_memory_offset;
     static int _code_heap_segmap_offset;
     static int _code_heap_segment_shift;
+    static int _heap_block_used_offset;
     static int _vs_low_bound_offset;
     static int _vs_high_bound_offset;
     static int _vs_low_offset;
     static int _vs_high_offset;
     static int _flag_name_offset;
     static int _flag_addr_offset;
+    static int _flag_origin_offset;
     static const char* _flags_addr;
     static int _flag_count;
     static int _flag_size;
@@ -120,8 +124,7 @@ class VMStructs {
     static void patchSafeFetch();
     static void initJvmFunctions();
     static void initTLS(void* vm_thread);
-    static void initThreadBridge(JNIEnv* env);
-    static void initLogging(JNIEnv* env);
+    static void initThreadBridge();
 
     const char* at(int offset) {
         return (const char*)this + offset;
@@ -129,6 +132,11 @@ class VMStructs {
 
     static bool goodPtr(const void* ptr) {
         return (uintptr_t)ptr >= 0x1000 && ((uintptr_t)ptr & (sizeof(uintptr_t) - 1)) == 0;
+    }
+
+    template<typename T>
+    static T align(const void* ptr) {
+        return (T)((uintptr_t)ptr & ~(sizeof(T) - 1));
     }
 
   public:
@@ -383,27 +391,47 @@ class NMethod : VMStructs {
         return *(int*) at(_frame_size_offset);
     }
 
-    int frameCompleteOffset() {
-        return *(int*) at(_frame_complete_offset);
+    short frameCompleteOffset() {
+        return *(short*) at(_frame_complete_offset);
     }
 
     void setFrameCompleteOffset(int offset) {
-        *(int*) at(_frame_complete_offset) = offset;
+        if (_nmethod_immutable_offset > 0) {
+            // _frame_complete_offset is short on JDK 23+
+            *(short*) at(_frame_complete_offset) = offset;
+        } else {
+            *(int*) at(_frame_complete_offset) = offset;
+        }
+    }
+
+    const char* immutableDataAt(int offset) {
+        if (_nmethod_immutable_offset > 0) {
+            return *(const char**) at(_nmethod_immutable_offset) + offset;
+        }
+        return at(offset);
     }
 
     const char* code() {
-        if (_code_begin_offset >= 0) {
-            return *(const char**) at(_code_begin_offset);
+        if (_code_offset > 0) {
+            return at(*(int*) at(_code_offset));
         } else {
-            return at(*(int*) at(-_code_begin_offset));
+            return *(const char**) at(-_code_offset);
         }
     }
 
     const char* scopes() {
-        if (_scopes_begin_offset >= 0) {
-            return *(const char**) at(_scopes_begin_offset);
+        if (_scopes_data_offset > 0) {
+            return immutableDataAt(*(int*) at(_scopes_data_offset));
         } else {
-            return at(*(int*) at(-_scopes_begin_offset));
+            return *(const char**) at(-_scopes_data_offset);
+        }
+    }
+
+    const void* entry() {
+        if (_nmethod_entry_offset > 0) {
+            return at(*(int*) at(_code_offset) + *(unsigned short*) at(_nmethod_entry_offset));
+        } else {
+            return *(void**) at(-_nmethod_entry_offset);
         }
     }
 
@@ -433,10 +461,6 @@ class NMethod : VMStructs {
         return *(VMMethod**) at(_nmethod_method_offset);
     }
 
-    void* entry() {
-        return *(void**) at(_nmethod_entry_offset);
-    }
-
     char state() {
         return *at(_nmethod_state_offset);
     }
@@ -450,6 +474,9 @@ class NMethod : VMStructs {
     }
 
     VMMethod** metadata() {
+        if (_data_offset > 0) {
+            return (VMMethod**) at(*(int*) at(_data_offset) + *(unsigned short*) at(_nmethod_metadata_offset));
+        }
         return (VMMethod**) at(*(int*) at(_nmethod_metadata_offset));
     }
 
@@ -509,14 +536,26 @@ class CollectedHeap : VMStructs {
 
 class JVMFlag : VMStructs {
   public:
-    static void* find(const char* name);
+    static JVMFlag* find(const char* name);
 
     const char* name() {
         return *(const char**) at(_flag_name_offset);
     }
 
-    void* addr() {
-        return *(void**) at(_flag_addr_offset);
+    char* addr() {
+        return *(char**) at(_flag_addr_offset);
+    }
+
+    char origin() {
+        return _flag_origin_offset >= 0 ? (*(char*) at(_flag_origin_offset)) & 15 : 0;
+    }
+
+    char get() {
+        return *addr();
+    }
+
+    void set(char value) {
+        *addr() = value;
     }
 };
 
@@ -530,7 +569,8 @@ class PcDesc {
 
 class ScopeDesc : VMStructs {
   private:
-    NMethod* _nm;
+    const unsigned char* _scopes;
+    VMMethod** _metadata;
     const unsigned char* _stream;
     int _method_offset;
     int _bci;
@@ -538,11 +578,13 @@ class ScopeDesc : VMStructs {
     int readInt();
 
   public:
-    ScopeDesc(NMethod* nm) : _nm(nm) {
+    ScopeDesc(NMethod* nm) {
+        _scopes = (const unsigned char*)nm->scopes();
+        _metadata = nm->metadata();
     }
 
     int decode(int offset) {
-        _stream = (const unsigned char*)_nm->scopes() + offset;
+        _stream = _scopes + offset;
         int sender_offset = readInt();
         _method_offset = readInt();
         _bci = readInt() - 1;
@@ -550,7 +592,7 @@ class ScopeDesc : VMStructs {
     }
 
     VMMethod* method() {
-        return _method_offset > 0 ? _nm->metadata()[_method_offset - 1] : NULL;
+        return _method_offset > 0 ? _metadata[_method_offset - 1] : NULL;
     }
 
     int bci() {

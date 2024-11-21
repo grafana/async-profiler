@@ -11,6 +11,7 @@
 
 const long DEFAULT_INTERVAL = 10000000;      // 10 ms
 const long DEFAULT_ALLOC_INTERVAL = 524287;  // 512 KiB
+const long DEFAULT_LOCK_INTERVAL = 10000;    // 10 us
 const int DEFAULT_JSTACKDEPTH = 2048;
 
 const char* const EVENT_CPU    = "cpu";
@@ -38,12 +39,6 @@ enum SHORT_ENUM Action {
 enum SHORT_ENUM Counter {
     COUNTER_SAMPLES,
     COUNTER_TOTAL
-};
-
-enum SHORT_ENUM Ring {
-    RING_ANY,
-    RING_KERNEL,
-    RING_USER
 };
 
 enum Style {
@@ -89,6 +84,8 @@ enum JfrOption {
     NO_CPU_LOAD     = 0x8,
     NO_HEAP_SUMMARY = 0x10,
 
+    IN_MEMORY       = 0x100,
+
     JFR_SYNC_OPTS   = NO_SYSTEM_INFO | NO_SYSTEM_PROPS | NO_NATIVE_LIBS | NO_CPU_LOAD | NO_HEAP_SUMMARY
 };
 
@@ -105,10 +102,11 @@ struct StackWalkFeatures {
     unsigned short probe_sp      : 1;
     unsigned short vtable_target : 1;
     unsigned short comp_task     : 1;
-    unsigned short _reserved     : 7;
+    unsigned short pc_addr       : 1;
+    unsigned short _reserved     : 6;
 
     StackWalkFeatures() : unknown_java(1), unwind_stub(1), unwind_comp(1), unwind_native(1), java_anchor(1), gc_traces(1),
-                          probe_sp(0), vtable_target(0), comp_task(0), _reserved(0) {
+                          probe_sp(0), vtable_target(0), comp_task(0), pc_addr(0), _reserved(0) {
     }
 };
 
@@ -155,7 +153,6 @@ class Arguments {
   public:
     Action _action;
     Counter _counter;
-    Ring _ring;
     const char* _event;
     int _timeout;
     long _interval;
@@ -178,6 +175,8 @@ class Arguments {
     bool _threads;
     bool _sched;
     bool _live;
+    bool _nobatch;
+    bool _alluser;
     bool _fdtransfer;
     const char* _fdtransfer_path;
     int _style;
@@ -204,7 +203,6 @@ class Arguments {
         _shared(false),
         _action(ACTION_NONE),
         _counter(COUNTER_SAMPLES),
-        _ring(RING_ANY),
         _event(NULL),
         _timeout(0),
         _interval(0),
@@ -227,6 +225,8 @@ class Arguments {
         _threads(false),
         _sched(false),
         _live(false),
+        _nobatch(false),
+        _alluser(false),
         _fdtransfer(false),
         _fdtransfer_path(NULL),
         _style(0),

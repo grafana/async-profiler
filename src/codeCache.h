@@ -23,12 +23,14 @@ enum ImportId {
     im_pthread_create,
     im_pthread_exit,
     im_pthread_setspecific,
+    im_poll,
     NUM_IMPORTS
 };
 
 enum Mark {
-    MARK_INTERPRETER = 1,
-    MARK_COMPILER_ENTRY = 2
+    MARK_VM_RUNTIME = 1,
+    MARK_INTERPRETER = 2,
+    MARK_COMPILER_ENTRY = 3
 };
 
 

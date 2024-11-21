@@ -6,8 +6,8 @@
 #ifndef _PROFILER_H
 #define _PROFILER_H
 
-#include <iostream>
 #include <map>
+#include <string>
 #include <time.h>
 #include "arch.h"
 #include "arguments.h"
@@ -23,6 +23,7 @@
 #include "threadFilter.h"
 #include "trap.h"
 #include "vmEntry.h"
+#include "writer.h"
 
 
 const int MAX_NATIVE_FRAMES = 128;
@@ -146,9 +147,9 @@ class Profiler {
     void lockAll();
     void unlockAll();
 
-    void dumpCollapsed(std::ostream& out, Arguments& args);
-    void dumpFlameGraph(std::ostream& out, Arguments& args, bool tree);
-    void dumpText(std::ostream& out, Arguments& args);
+    void dumpCollapsed(Writer& out, Arguments& args);
+    void dumpFlameGraph(Writer& out, Arguments& args, bool tree);
+    void dumpText(Writer& out, Arguments& args);
 
     static Profiler* const _instance;
 
@@ -183,14 +184,14 @@ class Profiler {
     }
 
     u64 total_samples() { return _total_samples; }
-    time_t uptime()     { return time(NULL) - _start_time; }
+    long uptime()       { return time(NULL) - _start_time; }
 
     Dictionary* classMap() { return &_class_map; }
     ThreadFilter* threadFilter() { return &_thread_filter; }
     CodeCacheArray* nativeLibs() { return &_native_libs; }
 
     Error run(Arguments& args);
-    Error runInternal(Arguments& args, std::ostream& out);
+    Error runInternal(Arguments& args, Writer& out);
     Error restart(Arguments& args);
     void shutdown(Arguments& args);
     Error check(Arguments& args);
@@ -199,14 +200,15 @@ class Profiler {
     u64 getContextId();
     Error stop(bool restart = false);
     Error flushJfr();
-    Error dump(std::ostream& out, Arguments& args);
-    void printUsedMemory(std::ostream& out);
+    Error dump(Writer& out, Arguments& args);
+    void printUsedMemory(Writer& out);
     void switchThreadEvents(jvmtiEventMode mode);
-    int convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames);
+    int convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type);
     u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
-    void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id);
+    void recordExternalSamples(u64 samples, u64 counter, int tid, u32 call_trace_id, EventType event_type, Event* event);
     void recordEventOnly(EventType event_type, Event* event);
+    void tryResetCounters();
     void writeLog(LogLevel level, const char* message);
     void writeLog(LogLevel level, const char* message, size_t len);
 
