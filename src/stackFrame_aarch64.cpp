@@ -151,6 +151,19 @@ bool StackFrame::unwindCompiled(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintp
     return true;
 }
 
+bool StackFrame::unwindAtomicStub(const void*& pc) {
+    // VM threads may call generated atomic stubs, which are not normally walkable
+    const void* lr = (const void*)link();
+    if (VMStructs::libjvm()->contains(lr)) {
+        NMethod* nm = CodeHeap::findNMethod(pc);
+        if (nm != NULL && strncmp(nm->name(), "Stub", 4) == 0) {
+            pc = lr;
+            return true;
+        }
+    }
+    return false;
+}
+
 void StackFrame::adjustSP(const void* entry, const void* pc, uintptr_t& sp) {
     instruction_t* ip = (instruction_t*)pc;
     if (ip > entry && (ip[-1] == 0xa9bf27ff || (ip[-1] == 0xd63f0100 && ip[-2] == 0xa9bf27ff))) {
@@ -180,7 +193,7 @@ bool StackFrame::checkInterruptedSyscall() {
     if (REG(pstate, cpsr) & (1 << 29)) {
         return (retval() & 0xff) == EINTR || (retval() & 0xff) == ETIMEDOUT;
     } else {
-        return retval() == (uintptr_t)-EINTR; 
+        return retval() == (uintptr_t)-EINTR;
     }
 #else
     if (retval() == (uintptr_t)-EINTR) {

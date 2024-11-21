@@ -80,7 +80,8 @@ FrameName::FrameName(Arguments& args, int style, int epoch, Mutex& thread_names_
     _cache_epoch((unsigned char)epoch),
     _cache_max_age(args._mcache),
     _thread_names_lock(thread_names_lock),
-    _thread_names(thread_names)
+    _thread_names(thread_names),
+    _jni(VM::jni())
 {
     // Require printf to use standard C format regardless of system locale
     _saved_locale = uselocale(newlocale(LC_NUMERIC_MASK, "C", (locale_t)0));
@@ -161,7 +162,7 @@ void FrameName::javaMethodName(jmethodID method) {
         }
     }
 
-    jclass method_class;
+    jclass method_class = NULL;
     char* class_name = NULL;
     char* method_name = NULL;
     char* method_sig = NULL;
@@ -189,6 +190,9 @@ void FrameName::javaMethodName(jmethodID method) {
         _str.assign(buf);
     }
 
+    if (method_class) {
+        _jni->DeleteLocalRef(method_class);
+    }
     jvmti->Deallocate((unsigned char*)class_name);
     jvmti->Deallocate((unsigned char*)method_sig);
     jvmti->Deallocate((unsigned char*)method_name);
@@ -288,6 +292,12 @@ const char* FrameName::name(ASGCT_CallFrame& frame, bool for_matching) {
             }
         }
 
+        case BCI_ADDRESS: {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%p", frame.method_id);
+            return _str.assign(buf).c_str();
+        }
+
         case BCI_ERROR:
             return _str.assign("[").append((const char*)frame.method_id).append("]").c_str();
 
@@ -297,10 +307,11 @@ const char* FrameName::name(ASGCT_CallFrame& frame, bool for_matching) {
             JMethodCache::iterator it = _cache.lower_bound(frame.method_id);
             if (it != _cache.end() && it->first == frame.method_id) {
                 it->second[0] = _cache_epoch;
+                const char* name = it->second.c_str() + 1;
                 if (type_suffix != NULL) {
-                    return _str.assign(it->second, 1, std::string::npos).append(type_suffix).c_str();
+                    return _str.assign(name).append(type_suffix).c_str();
                 }
-                return it->second.c_str() + 1;
+                return name;
             }
 
             javaMethodName(frame.method_id);
@@ -340,6 +351,7 @@ FrameTypeId FrameName::type(ASGCT_CallFrame& frame) {
             return FRAME_KERNEL;
 
         case BCI_THREAD_ID:
+        case BCI_ADDRESS:
         case BCI_ERROR:
             return FRAME_NATIVE;
 

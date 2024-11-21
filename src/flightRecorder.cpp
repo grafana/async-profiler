@@ -28,7 +28,7 @@
 #include "vmStructs.h"
 
 
-INCBIN(JFR_SYNC_CLASS, "src/helper/one/profiler/JfrSync.class")
+INCLUDE_HELPER_CLASS(JFR_SYNC_NAME, JFR_SYNC_CLASS, "one/profiler/JfrSync")
 
 static void JNICALL JfrSync_stopProfiler(JNIEnv* env, jclass cls) {
     Profiler::instance()->stop();
@@ -56,7 +56,6 @@ static jmethodID _start_method;
 static jmethodID _stop_method;
 static jmethodID _box_method;
 
-static const char* const SETTING_RING[] = {NULL, "kernel", "user"};
 static const char* const SETTING_CSTACK[] = {NULL, "no", "fp", "dwarf", "lbr", "vm"};
 static const char* const SETTING_CLOCK[] = {NULL, "tsc", "monotonic"};
 
@@ -134,6 +133,8 @@ class Lookup {
     Dictionary _symbols;
 
   private:
+    JNIEnv* _jni;
+
     void fillNativeMethodInfo(MethodInfo* mi, const char* name, const char* lib_name) {
         if (lib_name == NULL) {
             mi->_class = _classes->lookup("");
@@ -181,7 +182,7 @@ class Lookup {
 
         jvmtiEnv* jvmti = VM::jvmti();
 
-        jclass method_class;
+        jclass method_class = NULL;
         char* class_name = NULL;
         char* method_name = NULL;
         char* method_sig = NULL;
@@ -198,6 +199,9 @@ class Lookup {
             mi->_sig = _symbols.lookup("()L;");
         }
 
+        if (method_class) {
+            _jni->DeleteLocalRef(method_class);
+        }
         jvmti->Deallocate((unsigned char*)method_sig);
         jvmti->Deallocate((unsigned char*)method_name);
         jvmti->Deallocate((unsigned char*)class_name);
@@ -227,7 +231,7 @@ class Lookup {
 
   public:
     Lookup(MethodMap* method_map, Dictionary* classes) :
-        _method_map(method_map), _classes(classes), _packages(), _symbols() {
+        _method_map(method_map), _classes(classes), _packages(), _symbols(), _jni(VM::jni()) {
     }
 
     MethodInfo* resolveMethod(ASGCT_CallFrame& frame) {
@@ -250,6 +254,10 @@ class Lookup {
             } else if (frame.bci == BCI_NATIVE_FRAME) {
                 const char* name = (const char*)method;
                 fillNativeMethodInfo(mi, name, Profiler::instance()->getLibraryName(name));
+            } else if (frame.bci == BCI_ADDRESS) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%p", method);
+                fillNativeMethodInfo(mi, buf, NULL);
             } else if (frame.bci == BCI_ERROR) {
                 fillNativeMethodInfo(mi, (const char*)method, NULL);
             } else {
@@ -424,6 +432,7 @@ class Recording {
 
     RecordingBuffer _buf[CONCURRENCY_LEVEL];
     int _fd;
+    int _memfd;
     char* _master_recording_file;
     off_t _chunk_start;
     ThreadFilter _thread_set;
@@ -442,6 +451,7 @@ class Recording {
     int _available_processors;
     int _recorded_lib_count;
 
+    bool _in_memory;
     bool _cpu_monitor_enabled;
     bool _heap_monitor_enabled;
     u32 _last_gc_id;
@@ -460,6 +470,8 @@ class Recording {
         _start_ticks = TSC::ticks();
         _base_id = 0;
         _bytes_written = 0;
+        _memfd = -1;
+        _in_memory = false;
 
         _chunk_size = args._chunk_size <= 0 ? MAX_JLONG : (args._chunk_size < 262144 ? 262144 : args._chunk_size);
         _chunk_time = args._chunk_time <= 0 ? MAX_JLONG : (args._chunk_time < 5 ? 5 : args._chunk_time) * 1000000ULL;
@@ -485,6 +497,10 @@ class Recording {
         }
         flush(_buf);
 
+        if (args.hasOption(IN_MEMORY) && (_memfd = OS::createMemoryFile("async-profiler-recording")) >= 0) {
+            _in_memory = true;
+        }
+
         _cpu_monitor_enabled = !args.hasOption(NO_CPU_LOAD);
         if (_cpu_monitor_enabled) {
             _last_times.proc.real = OS::getProcessCpuTime(&_last_times.proc.user, &_last_times.proc.system);
@@ -497,6 +513,10 @@ class Recording {
 
     ~Recording() {
         off_t chunk_end = finishChunk();
+
+        if (_memfd >= 0) {
+            close(_memfd);
+        }
 
         if (_master_recording_file != NULL) {
             appendRecording(_master_recording_file, chunk_end);
@@ -517,6 +537,11 @@ class Recording {
 
         _stop_time = OS::micros();
         _stop_ticks = TSC::ticks();
+
+        if (_memfd >= 0) {
+            OS::copyFile(_memfd, _fd, 0, lseek(_memfd, 0, SEEK_CUR));
+            _in_memory = false;
+        }
 
         off_t cpool_offset = lseek(_fd, 0, SEEK_CUR);
         writeCpool(_buf);
@@ -563,6 +588,11 @@ class Recording {
         writeMetadata(_buf);
         writeRecordingInfo(_buf);
         flush(_buf);
+
+        if (_memfd >= 0) {
+            while (ftruncate(_memfd, 0) < 0 && errno == EINTR);  // restart if interrupted
+            _in_memory = true;
+        }
     }
 
     bool needSwitchChunk(u64 wall_time) {
@@ -570,7 +600,8 @@ class Recording {
     }
 
     size_t usedMemory() {
-        return _method_map.usedMemory() + _thread_set.usedMemory();
+        return _method_map.usedMemory() + _thread_set.usedMemory() +
+               (_memfd >= 0 ? lseek(_memfd, 0, SEEK_CUR) : 0);
     }
 
     void cpuMonitorCycle() {
@@ -643,9 +674,9 @@ class Recording {
             jmethodID to_string = env->GetMethodID(env->FindClass("java/lang/Object"), "toString", "()Ljava/lang/String;");
             if (get_agent_props != NULL && to_string != NULL) {
                 jobject props = env->CallStaticObjectMethod(vm_support, get_agent_props);
-                if (props != NULL) {
+                if (props != NULL && !env->ExceptionCheck()) {
                     jstring str = (jstring)env->CallObjectMethod(props, to_string);
-                    if (str != NULL) {
+                    if (str != NULL && !env->ExceptionCheck()) {
                         _agent_properties = (char*)env->GetStringUTFChars(str, NULL);
                     }
                 }
@@ -681,7 +712,7 @@ class Recording {
     }
 
     const char* getFeaturesString(char* str, size_t size, StackWalkFeatures f) {
-        snprintf(str, size, "%s %s %s %s %s %s %s %s %s",
+        snprintf(str, size, "%s %s %s %s %s %s %s %s %s %s",
                  f.unknown_java  ? "unknown_java"  : "-",
                  f.unwind_stub   ? "unwind_stub"   : "-",
                  f.unwind_comp   ? "unwind_comp"   : "-",
@@ -690,12 +721,13 @@ class Recording {
                  f.gc_traces     ? "gc_traces"     : "-",
                  f.probe_sp      ? "probesp"       : "-",
                  f.vtable_target ? "vtable"        : "-",
-                 f.comp_task     ? "comptask"      : "-");
+                 f.comp_task     ? "comptask"      : "-",
+                 f.pc_addr       ? "pcaddr"        : "-");
         return str;
     }
 
     void flush(Buffer* buf) {
-        ssize_t result = write(_fd, buf->data(), buf->offset());
+        ssize_t result = write(_in_memory ? _memfd : _fd, buf->data(), buf->offset());
         if (result > 0) {
             atomicInc(_bytes_written, result);
         }
@@ -771,7 +803,7 @@ class Recording {
 
     void writeSettings(Buffer* buf, Arguments& args) {
         writeStringSetting(buf, T_ACTIVE_RECORDING, "version", PROFILER_VERSION);
-        writeStringSetting(buf, T_ACTIVE_RECORDING, "ring", SETTING_RING[args._ring]);
+        writeStringSetting(buf, T_ACTIVE_RECORDING, "engine", Profiler::instance()->_engine->type());
         writeStringSetting(buf, T_ACTIVE_RECORDING, "cstack", SETTING_CSTACK[args._cstack]);
         writeStringSetting(buf, T_ACTIVE_RECORDING, "clock", SETTING_CLOCK[args._clock]);
         writeStringSetting(buf, T_ACTIVE_RECORDING, "event", args._event);
@@ -791,15 +823,18 @@ class Recording {
         writeBoolSetting(buf, T_EXECUTION_SAMPLE, "enabled", args._event != NULL);
         if (args._event != NULL) {
             writeIntSetting(buf, T_EXECUTION_SAMPLE, "interval", args._interval);
+            writeBoolSetting(buf, T_EXECUTION_SAMPLE, "alluser", args._alluser);
         }
         if (args._wall >= 0) {
             writeIntSetting(buf, T_EXECUTION_SAMPLE, "wall", args._wall);
+            writeBoolSetting(buf, T_EXECUTION_SAMPLE, "nobatch", args._nobatch);
         }
 
         writeBoolSetting(buf, T_ALLOC_IN_NEW_TLAB, "enabled", args._alloc >= 0);
         writeBoolSetting(buf, T_ALLOC_OUTSIDE_TLAB, "enabled", args._alloc >= 0);
         if (args._alloc >= 0) {
             writeIntSetting(buf, T_ALLOC_IN_NEW_TLAB, "alloc", args._alloc);
+            writeBoolSetting(buf, T_ALLOC_IN_NEW_TLAB, "live", args._live);
         }
 
         writeBoolSetting(buf, T_MONITOR_ENTER, "enabled", args._lock >= 0);
@@ -917,6 +952,7 @@ class Recording {
                 buf->putVar32(start, buf->offset() - start);
                 jvmti->Deallocate((unsigned char*)value);
             }
+            jvmti->Deallocate((unsigned char*)key);
         }
 
         jvmti->Deallocate((unsigned char*)keys);
@@ -1146,7 +1182,7 @@ class Recording {
     void recordExecutionSample(Buffer* buf, int tid, u32 call_trace_id, ExecutionEvent* event) {
         int start = buf->skip(1);
         buf->put8(T_EXECUTION_SAMPLE);
-        buf->putVar64(TSC::ticks());
+        buf->putVar64(event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
         buf->putVar32(event->_thread_state);
@@ -1154,10 +1190,21 @@ class Recording {
         buf->put8(start, buf->offset() - start);
     }
 
+    void recordWallClockSample(Buffer* buf, int tid, u32 call_trace_id, WallClockEvent* event) {
+        int start = buf->skip(1);
+        buf->put8(T_WALL_CLOCK_SAMPLE);
+        buf->putVar64(event->_start_time);
+        buf->putVar32(tid);
+        buf->putVar32(call_trace_id);
+        buf->putVar32(event->_thread_state);
+        buf->putVar32(event->_samples);
+        buf->put8(start, buf->offset() - start);
+    }
+
     void recordAllocationInNewTLAB(Buffer* buf, int tid, u32 call_trace_id, AllocEvent* event) {
         int start = buf->skip(1);
         buf->put8(T_ALLOC_IN_NEW_TLAB);
-        buf->putVar64(TSC::ticks());
+        buf->putVar64(event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
         buf->putVar32(event->_class_id);
@@ -1170,7 +1217,7 @@ class Recording {
     void recordAllocationOutsideTLAB(Buffer* buf, int tid, u32 call_trace_id, AllocEvent* event) {
         int start = buf->skip(1);
         buf->put8(T_ALLOC_OUTSIDE_TLAB);
-        buf->putVar64(TSC::ticks());
+        buf->putVar64(event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
         buf->putVar32(event->_class_id);
@@ -1182,7 +1229,7 @@ class Recording {
     void recordLiveObject(Buffer* buf, int tid, u32 call_trace_id, LiveObject* event) {
         int start = buf->skip(1);
         buf->put8(T_LIVE_OBJECT);
-        buf->putVar64(TSC::ticks());
+        buf->putVar64(event->_start_time);
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
         buf->putVar32(event->_class_id);
@@ -1364,7 +1411,7 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
 
         const JNINativeMethod native_method = {(char*)"stopProfiler", (char*)"()V", (void*)JfrSync_stopProfiler};
 
-        jclass cls = env->DefineClass(NULL, NULL, (const jbyte*)JFR_SYNC_CLASS, INCBIN_SIZEOF(JFR_SYNC_CLASS));
+        jclass cls = env->DefineClass(JFR_SYNC_NAME, NULL, (const jbyte*)JFR_SYNC_CLASS, INCBIN_SIZEOF(JFR_SYNC_CLASS));
         if (cls == NULL || env->RegisterNatives(cls, &native_method, 1) != 0
                 || (_start_method = env->GetStaticMethodID(cls, "start", "(Ljava/lang/String;Ljava/lang/String;I)V")) == NULL
                 || (_stop_method = env->GetStaticMethodID(cls, "stop", "()V")) == NULL
@@ -1381,6 +1428,7 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
             jmethodID method = env->GetStaticMethodID(options_class, "setMaxChunkSize", "(J)V");
             if (method != NULL) {
                 env->CallStaticVoidMethod(options_class, method, args._chunk_size < 1024 * 1024 ? 1024 * 1024 : args._chunk_size);
+                env->ExceptionClear();
             }
         }
 
@@ -1388,7 +1436,7 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
             jmethodID method = env->GetStaticMethodID(options_class, "setStackDepth", "(Ljava/lang/Integer;)V");
             if (method != NULL) {
                 jobject value = env->CallStaticObjectMethod(_jfr_sync_class, _box_method, args._jstackdepth);
-                if (value != NULL) {
+                if (value != NULL && !env->ExceptionCheck()) {
                     env->CallStaticVoidMethod(options_class, method, value);
                 }
             }
@@ -1428,6 +1476,9 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
             case EXECUTION_SAMPLE:
             case INSTRUMENTED_METHOD:
                 _rec->recordExecutionSample(buf, tid, call_trace_id, (ExecutionEvent*)event);
+                break;
+            case WALL_CLOCK_SAMPLE:
+                _rec->recordWallClockSample(buf, tid, call_trace_id, (WallClockEvent*)event);
                 break;
             case ALLOC_SAMPLE:
                 _rec->recordAllocationInNewTLAB(buf, tid, call_trace_id, (AllocEvent*)event);
