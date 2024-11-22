@@ -30,3 +30,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/cache/apt /var/lib/apt/lists/*
 
 COPY --from=0 /usr/local/musl /usr/local/musl
+
+RUN mkdir -p /asprof
+ADD ./src /asprof/src
+ADD ./Makefile ./LICENSE ./*.md ./JavaHome.class /asprof/
+WORKDIR /asprof
+RUN make release
+
+FROM scratch
+COPY --from=1 /asprof/*.tar.gz /
