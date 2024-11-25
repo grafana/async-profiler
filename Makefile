@@ -1,4 +1,4 @@
-PROFILER_VERSION ?= 3.0.0.0
+PROFILER_VERSION ?= 3.0.0.1
 
 ifeq ($(COMMIT_TAG),true)
   PROFILER_VERSION := $(PROFILER_VERSION)-$(shell git rev-parse --short=8 HEAD)
@@ -139,7 +139,7 @@ endif
 
 $(PACKAGE_DIR): all LICENSE README.md
 	mkdir -p $(PACKAGE_DIR)
-	cp -RP build/bin build/lib LICENSE README.md $(PACKAGE_DIR)/
+	cp -RP build/bin build/lib build/jar LICENSE README.md $(PACKAGE_DIR)/
 	chmod -R 755 $(PACKAGE_DIR)
 	chmod 644 $(PACKAGE_DIR)/lib/* $(PACKAGE_DIR)/LICENSE $(PACKAGE_DIR)/README.md
 
