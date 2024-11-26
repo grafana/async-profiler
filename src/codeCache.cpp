@@ -114,6 +114,11 @@ void CodeCache::mark(NamePredicate predicate, char value) {
             NativeFunc::mark(blob_name, value);
         }
     }
+
+    if (value == MARK_VM_RUNTIME && _name != NULL) {
+        // In case a library has no debug symbols
+        NativeFunc::mark(_name, value);
+    }
 }
 
 CodeBlob* CodeCache::findBlob(const char* name) {
@@ -191,6 +196,8 @@ void CodeCache::addImport(void** entry, const char* name) {
                 _imports[im_pthread_exit] = entry;
             } else if (strcmp(name, "pthread_setspecific") == 0) {
                 _imports[im_pthread_setspecific] = entry;
+            } else if (strcmp(name, "poll") == 0) {
+                _imports[im_poll] = entry;
             }
             break;
     }
