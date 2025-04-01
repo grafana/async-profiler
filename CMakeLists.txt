@@ -19,7 +19,7 @@ add_library(async-profiler
         ./src/j9StackTraces.cpp
         ./src/mutex.cpp
         ./src/flightRecorder.cpp
-        ./src/perfEvents_macos.cpp
+
         ./src/javaApi.cpp
         ./src/j9WallClock.cpp
         ./src/stackFrame_arm.cpp
@@ -29,7 +29,7 @@ add_library(async-profiler
         ./src/lockTracer.cpp
         ./src/dictionary.cpp
         ./src/fdtransferClient_linux.cpp
-        ./src/fdtransfer/fdtransferServer.cpp
+
         ./src/perfEvents_linux.cpp
         ./src/linearAllocator.cpp
         ./src/stackFrame_i386.cpp
@@ -59,3 +59,18 @@ target_include_directories(async-profiler PRIVATE
         /usr/lib/jvm/java-11-openjdk-amd64/include/linux)
 
 # -DPROFILER_VERSION=\"2.9.0.2\" -I/usr/lib/jvm/java-11-openjdk-amd64/include -Isrc/res -Isrc/helper -I/usr/lib/jvm/java-11-openjdk-amd64/include/linux -fPIC -shared -o
+
+
+add_executable(pyroscope_labels_test
+        src/pyroscope/labels_test.cpp
+        src/Context.cpp
+
+)
+target_compile_options(pyroscope_labels_test PRIVATE -fno-omit-frame-pointer -momit-leaf-frame-pointer -fPIC)
+target_compile_definitions(pyroscope_labels_test PRIVATE PROFILER_VERSION=\"0.0.0\" PYROSCOPE_LABELS_TESTING=1)
+target_include_directories(pyroscope_labels_test PRIVATE
+        ./src
+        ./src/res
+        ./src/helper
+        /usr/lib/jvm/java-11-openjdk-amd64/include
+        /usr/lib/jvm/java-11-openjdk-amd64/include/linux)

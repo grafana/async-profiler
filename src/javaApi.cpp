@@ -12,6 +12,9 @@
 #include "profiler.h"
 #include "vmStructs.h"
 
+#include "AutoThreadlocal.h"
+#include "Context.h"
+
 
 INCLUDE_HELPER_CLASS(SERVER_NAME, SERVER_CLASS, "one/profiler/Server")
 
@@ -61,6 +64,25 @@ Java_one_profiler_AsyncProfiler_setContextId0(JNIEnv* env, jobject unused, jlong
     if (error) {
         throwNew(env, "java/lang/IllegalStateException", error.message());
     }
+}
+
+// may keep the labels reference until the next jfr stop-dump if captured along with a trace
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_setContextLabels0(JNIEnv* env, jobject unused, jobject labels)
+{
+    auto ctx = pyroscope::_auto_thread_local->get();
+    if (!ctx)
+    {
+        return;
+    }
+
+
+    jobject global_ref{nullptr};
+    if (labels)
+    {
+        global_ref = env->NewGlobalRef(labels);
+    }
+    ctx->setLabels(global_ref);
 }
 
 extern "C" DLLEXPORT jstring JNICALL
