@@ -1179,6 +1179,13 @@ class Recording {
         }
     }
 
+    void writePyroscopeContext(Buffer* buf)
+    {
+        buf->putVar64(Profiler::instance()->getSpanId());
+        buf->putVar64(Profiler::instance()->getSpanName());
+        buf->putVar64(Profiler::instance()->getContextId());
+    }
+
     void recordExecutionSample(Buffer* buf, int tid, u32 call_trace_id, ExecutionEvent* event) {
         int start = buf->skip(1);
         buf->put8(T_EXECUTION_SAMPLE);
@@ -1186,7 +1193,7 @@ class Recording {
         buf->putVar32(tid);
         buf->putVar32(call_trace_id);
         buf->putVar32(event->_thread_state);
-        buf->putVar64(Profiler::instance()->getContextId());
+        writePyroscopeContext(buf);
         buf->put8(start, buf->offset() - start);
     }
 
@@ -1210,9 +1217,10 @@ class Recording {
         buf->putVar32(event->_class_id);
         buf->putVar64(event->_instance_size);
         buf->putVar64(event->_total_size);
-        buf->putVar64(Profiler::instance()->getContextId());
+        writePyroscopeContext(buf);
         buf->put8(start, buf->offset() - start);
     }
+
 
     void recordAllocationOutsideTLAB(Buffer* buf, int tid, u32 call_trace_id, AllocEvent* event) {
         int start = buf->skip(1);
@@ -1222,7 +1230,7 @@ class Recording {
         buf->putVar32(call_trace_id);
         buf->putVar32(event->_class_id);
         buf->putVar64(event->_total_size);
-        buf->putVar64(Profiler::instance()->getContextId());
+        writePyroscopeContext(buf);
         buf->put8(start, buf->offset() - start);
     }
 
@@ -1248,7 +1256,7 @@ class Recording {
         buf->putVar32(event->_class_id);
         buf->put8(0);
         buf->putVar64(event->_address);
-        buf->putVar64(Profiler::instance()->getContextId());
+        writePyroscopeContext(buf);
         buf->put8(start, buf->offset() - start);
     }
 
@@ -1524,3 +1532,5 @@ void FlightRecorder::recordLog(LogLevel level, const char* message, size_t len) 
 
     _rec_lock.unlockShared();
 }
+
+
