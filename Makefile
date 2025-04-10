@@ -1,4 +1,4 @@
-PROFILER_VERSION ?= 3.0.0.1
+PROFILER_VERSION ?= 3.0.0.3
 
 ifeq ($(COMMIT_TAG),true)
   PROFILER_VERSION := $(PROFILER_VERSION)-$(shell git rev-parse --short=8 HEAD)
