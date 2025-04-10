@@ -276,6 +276,10 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
         setContextId0(contextId);
     }
 
+    public void setTracingContext(long spanId, long spanName) {
+        setTracingContext0(spanId, spanName);
+    }
+
     /**
      * Clears context identifier for current thread.
      */
@@ -291,4 +295,5 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
 
     private native void filterThread0(Thread thread, boolean enable);
     private native void setContextId0(long contextId);
+    private native void setTracingContext0(long spanId, long spanName);
 }

@@ -198,6 +198,10 @@ class Profiler {
     Error start(Arguments& args, bool reset);
     Error setContextId(u64 contextId);
     u64 getContextId();
+    Error setSpanId(u64 profileId);
+    u64 getSpanId();
+    Error setSpanName(u64 spanName);
+    u64 getSpanName();
     Error stop(bool restart = false);
     Error flushJfr();
     Error dump(Writer& out, Arguments& args);

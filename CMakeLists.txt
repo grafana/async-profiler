@@ -19,7 +19,6 @@ add_library(async-profiler
         ./src/j9StackTraces.cpp
         ./src/mutex.cpp
         ./src/flightRecorder.cpp
-        ./src/perfEvents_macos.cpp
         ./src/javaApi.cpp
         ./src/j9WallClock.cpp
         ./src/stackFrame_arm.cpp
@@ -29,7 +28,6 @@ add_library(async-profiler
         ./src/lockTracer.cpp
         ./src/dictionary.cpp
         ./src/fdtransferClient_linux.cpp
-        ./src/fdtransfer/fdtransferServer.cpp
         ./src/perfEvents_linux.cpp
         ./src/linearAllocator.cpp
         ./src/stackFrame_i386.cpp
