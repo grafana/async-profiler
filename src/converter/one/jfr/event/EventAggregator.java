@@ -5,35 +5,29 @@
 
 package one.jfr.event;
 
-public class EventAggregator {
+public class EventAggregator implements EventCollector {
     private static final int INITIAL_CAPACITY = 1024;
 
     private final boolean threads;
-    private final boolean total;
-    private final double factor;
+    private final double grain;
     private Event[] keys;
     private long[] samples;
     private long[] values;
     private int size;
     private double fraction;
 
-    public EventAggregator(boolean threads, boolean total) {
-        this(threads, total, 1.0);
-    }
-
-    public EventAggregator(boolean threads, boolean total, double factor) {
+    public EventAggregator(boolean threads, double grain) {
         this.threads = threads;
-        this.total = total;
-        this.factor = factor;
-        this.keys = new Event[INITIAL_CAPACITY];
-        this.samples = new long[INITIAL_CAPACITY];
-        this.values = new long[INITIAL_CAPACITY];
+        this.grain = grain;
+
+        beforeChunk();
     }
 
     public int size() {
         return size;
     }
 
+    @Override
     public void collect(Event e) {
         collect(e, e.samples(), e.value());
     }
@@ -59,24 +53,45 @@ public class EventAggregator {
         }
     }
 
-    public void forEach(Visitor visitor) {
-        for (int i = 0; i < keys.length; i++) {
-            if (keys[i] != null) {
-                visitor.visit(keys[i], samples[i], values[i]);
-            }
+    @Override
+    public void beforeChunk() {
+        if (keys == null || size > 0) {
+            keys = new Event[INITIAL_CAPACITY];
+            samples = new long[INITIAL_CAPACITY];
+            values = new long[INITIAL_CAPACITY];
+            size = 0;
         }
     }
 
-    public void forEach(ValueVisitor visitor) {
-        double factor = total ? this.factor : 0.0;
-        for (int i = 0; i < keys.length; i++) {
-            if (keys[i] != null) {
-                visitor.visit(keys[i], factor == 0.0 ? samples[i] : factor == 1.0 ? values[i] : (long) (values[i] * factor));
+    @Override
+    public void afterChunk() {
+        if (grain > 0) {
+            coarsen(grain);
+        }
+    }
+
+    @Override
+    public boolean finish() {
+        keys = null;
+        samples = null;
+        values = null;
+        return false;
+    }
+
+    @Override
+    public void forEach(Visitor visitor) {
+        if (size > 0) {
+            for (int i = 0; i < keys.length; i++) {
+                if (keys[i] != null) {
+                    visitor.visit(keys[i], samples[i], values[i]);
+                }
             }
         }
     }
 
     public void coarsen(double grain) {
+        fraction = 0;
+
         for (int i = 0; i < keys.length; i++) {
             if (keys[i] != null) {
                 long s0 = samples[i];
@@ -130,13 +145,5 @@ public class EventAggregator {
         keys = newKeys;
         samples = newSamples;
         values = newValues;
-    }
-
-    public interface Visitor {
-        void visit(Event event, long samples, long value);
-    }
-
-    public interface ValueVisitor {
-        void visit(Event event, long value);
     }
 }

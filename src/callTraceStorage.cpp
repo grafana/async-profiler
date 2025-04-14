@@ -7,6 +7,7 @@
 #include "callTraceStorage.h"
 #include "os.h"
 
+#define COMMA ,
 
 static const u32 INITIAL_CAPACITY = 65536;
 static const u32 CALL_TRACE_CHUNK = 8 * 1024 * 1024;
@@ -78,8 +79,7 @@ class LongHashTable {
     }
 };
 
-
-CallTrace CallTraceStorage::_overflow_trace = {1, {BCI_ERROR, (jmethodID)"storage_overflow"}};
+CallTrace CallTraceStorage::_overflow_trace = {1, {BCI_ERROR, LP64_ONLY(0 COMMA) (jmethodID)"storage_overflow"}};
 
 CallTraceStorage::CallTraceStorage() : _allocator(CALL_TRACE_CHUNK) {
     _current_table = LongHashTable::allocate(NULL, INITIAL_CAPACITY);
@@ -99,6 +99,12 @@ void CallTraceStorage::clear() {
     _current_table->clear();
     _allocator.clear();
     _overflow = 0;
+}
+
+u32 CallTraceStorage::capacity() {
+    // As capacity of each subsequent table doubles,
+    // total capacity is a sum of geometric series: 64K + 128K + 256K...
+    return _current_table->capacity() * 2 - INITIAL_CAPACITY;
 }
 
 size_t CallTraceStorage::usedMemory() {
@@ -275,7 +281,7 @@ u32 CallTraceStorage::put(int num_frames, ASGCT_CallFrame* frames, u64 counter) 
 }
 
 void CallTraceStorage::add(u32 call_trace_id, u64 samples, u64 counter) {
-    if (call_trace_id == OVERFLOW_TRACE_ID) {
+    if (call_trace_id > capacity()) {  // this also covers call_trace_id == OVERFLOW_TRACE_ID
         return;
     }
 

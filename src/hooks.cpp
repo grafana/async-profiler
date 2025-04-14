@@ -11,6 +11,7 @@
 #include "hooks.h"
 #include "asprof.h"
 #include "cpuEngine.h"
+#include "mallocTracer.h"
 #include "profiler.h"
 
 
@@ -97,6 +98,7 @@ static void* dlopen_hook_impl(const char* filename, int flags, bool patch) {
         if (patch) {
             Hooks::patchLibraries();
         }
+        MallocTracer::installHooks();
     }
     return result;
 }
@@ -153,10 +155,10 @@ bool Hooks::init(bool attach) {
         return false;
     }
 
-    Profiler::instance()->updateSymbols(false);
     Profiler::setupSignalHandlers();
 
     if (attach) {
+        Profiler::instance()->updateSymbols(false);
         _orig_pthread_create = ADDRESS_OF(pthread_create);
         _orig_pthread_exit = ADDRESS_OF(pthread_exit);
         _orig_dlopen = ADDRESS_OF(dlopen);
@@ -180,7 +182,10 @@ void Hooks::patchLibraries() {
 
     while (_patched_libs < native_lib_count) {
         CodeCache* cc = (*native_libs)[_patched_libs++];
-        cc->patchImport(im_dlopen, (void*)dlopen_hook);
+        if (!cc->contains((const void*)Hooks::init)) {
+            // Let libasyncProfiler always use original dlopen
+            cc->patchImport(im_dlopen, (void*)dlopen_hook);
+        }
         cc->patchImport(im_pthread_create, (void*)pthread_create_hook);
         cc->patchImport(im_pthread_exit, (void*)pthread_exit_hook);
     }

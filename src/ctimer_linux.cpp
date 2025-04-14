@@ -98,6 +98,7 @@ Error CTimer::start(Arguments& args) {
     _interval = args._interval ? args._interval : DEFAULT_INTERVAL;
     _cstack = args._cstack;
     _signal = args._signal == 0 ? OS::getProfilingSignal(0) : args._signal & 0xff;
+    _count_overrun = true;
 
     int max_timers = OS::getMaxThreadId();
     if (max_timers != _max_timers) {
@@ -107,7 +108,6 @@ Error CTimer::start(Arguments& args) {
     }
 
     if (VM::isOpenJ9()) {
-        if (_cstack == CSTACK_DEFAULT) _cstack = CSTACK_DWARF;
         OS::installSignalHandler(_signal, signalHandlerJ9);
         Error error = J9StackTraces::start(args);
         if (error) {

@@ -31,9 +31,9 @@ Error ITimer::start(Arguments& args) {
     _interval = args._interval ? args._interval : DEFAULT_INTERVAL;
     _cstack = args._cstack;
     _signal = SIGPROF;
+    _count_overrun = false;
 
     if (VM::isOpenJ9()) {
-        if (_cstack == CSTACK_DEFAULT) _cstack = CSTACK_DWARF;
         OS::installSignalHandler(SIGPROF, signalHandlerJ9);
         Error error = J9StackTraces::start(args);
         if (error) {

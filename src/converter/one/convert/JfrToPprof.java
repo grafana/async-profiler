@@ -8,7 +8,6 @@ package one.convert;
 import one.jfr.JfrReader;
 import one.jfr.StackTrace;
 import one.jfr.event.Event;
-import one.jfr.event.EventAggregator;
 import one.proto.Proto;
 
 import java.io.FileOutputStream;
@@ -29,7 +28,9 @@ public class JfrToPprof extends JfrConverter {
         super(jfr, args);
 
         Proto sampleType;
-        if (args.alloc || args.live) {
+        if (args.nativemem) {
+            sampleType = valueType("malloc", args.total ? "bytes" : "count");
+        } else if (args.alloc || args.live) {
             sampleType = valueType("allocations", args.total ? "bytes" : "count");
         } else if (args.lock) {
             sampleType = valueType("locks", args.total ? "nanoseconds" : "count");
@@ -42,8 +43,8 @@ public class JfrToPprof extends JfrConverter {
     }
 
     @Override
-    protected void convertChunk() throws IOException {
-        collectEvents().forEach(new EventAggregator.ValueVisitor() {
+    protected void convertChunk() {
+        collector.forEach(new AggregatedEventVisitor() {
             final Proto s = new Proto(100);
 
             @Override

@@ -44,7 +44,7 @@ static const char USAGE_STRING[] =
     "  collect           collect profile for the specified period of time\n"
     "                    and then stop (default action)\n"
     "Options:\n"
-    "  -e event          profiling event: cpu|alloc|lock|cache-misses etc.\n"
+    "  -e event          profiling event: cpu|alloc|nativemem|lock|cache-misses etc.\n"
     "  -d duration       run profiling for <duration> seconds\n"
     "  -f filename       dump output to <filename>\n"
     "  -i interval       sampling interval in nanoseconds\n"
@@ -64,11 +64,15 @@ static const char USAGE_STRING[] =
     "\n"
     "  --title string    FlameGraph title\n"
     "  --minwidth pct    skip frames smaller than pct%%\n"
-    "  --reverse         generate stack-reversed FlameGraph / Call tree\n"
+    "  --reverse         generate stack-reversed FlameGraph / Call tree (defaults to icicle graph)\n"
+    "  --inverted        toggles the layout for reversed stacktraces from icicle to flamegraph\n"
+    "                    and for default stacktraces from flamegraph to icicle\n"
     "\n"
     "  --loop time       run profiler in a loop\n"
     "  --alloc bytes     allocation profiling interval in bytes\n"
     "  --live            build allocation profile from live objects only\n"
+    "  --nativemem bytes native allocation profiling interval in bytes\n"
+    "  --nofree          do not collect free calls in native allocation profiling\n"
     "  --lock duration   lock profiling threshold in nanoseconds\n"
     "  --wall interval   wall clock profiling interval\n"
     "  --total           accumulate the total value (time, bytes, etc.)\n"
@@ -79,11 +83,13 @@ static const char USAGE_STRING[] =
     "  --clock source    clock source for JFR timestamps: tsc|monotonic\n"
     "  --begin function  begin profiling when function is executed\n"
     "  --end function    end profiling when function is executed\n"
-    "  --ttsp            time-to-safepoint profiling\n"
+    "  --ttsp            only time-to-safepoint profiling \n"
+    "  --nostop          do not stop profiling outside --begin/--end window\n"
     "  --jfropts opts    JFR recording options: mem\n"
     "  --jfrsync config  synchronize profiler with JFR recording\n"
     "  --libpath path    full path to libasyncProfiler.so in the container\n"
     "  --fdtransfer      use fdtransfer to serve perf requests\n"
+    "  --target-cpu cpu  sample threads on a specific CPU (perf_events only, default: -1)\n"
     "                    from the non-privileged target\n"
     "\n"
     "<pid> is a numeric process ID of the target JVM\n"
@@ -487,16 +493,20 @@ int main(int argc, const char** argv) {
         } else if (arg == "--width" || arg == "--height" || arg == "--minwidth") {
             format << "," << (arg.str() + 2) << "=" << args.next();
 
-        } else if (arg == "--reverse" || arg == "--samples" || arg == "--total" || arg == "--sched" || arg == "--live") {
+        } else if (arg == "--reverse" || arg == "--inverted" || arg == "--samples" || arg == "--total" || arg == "--sched" || arg == "--live" || arg == "--nofree") {
             format << "," << (arg.str() + 2);
 
-        } else if (arg == "--alloc" || arg == "--lock" || arg == "--wall" ||
+        } else if (arg == "--alloc" || arg == "--nativemem" || arg == "--lock" || arg == "--wall" ||
                    arg == "--chunksize" || arg == "--chunktime" ||
-                   arg == "--cstack" || arg == "--signal" || arg == "--clock" || arg == "--begin" || arg == "--end") {
+                   arg == "--cstack" || arg == "--signal" || arg == "--clock" || arg == "--begin" || arg == "--end" ||
+                   arg == "--target-cpu") {
             params << "," << (arg.str() + 2) << "=" << args.next();
 
         } else if (arg == "--ttsp") {
             params << ",begin=SafepointSynchronize::begin,end=RuntimeService::record_safepoint_synchronized";
+
+        } else if (arg == "--nostop") {
+            params << ",nostop";
 
         } else if (arg == "--all-user") {
             params << ",alluser";
@@ -559,7 +569,7 @@ int main(int argc, const char** argv) {
 
     if (action == "collect") {
         run_fdtransfer(pid, fdtransfer);
-        run_jattach(pid, String("start,file=") << file << "," << output << format << params << ",log=" << logfile);
+        run_jattach(pid, String("start,quiet,file=") << file << "," << output << format << params << ",log=" << logfile);
 
         fprintf(stderr, "Profiling for %d seconds\n", duration);
         end_time = time_micros() + duration * 1000000ULL;

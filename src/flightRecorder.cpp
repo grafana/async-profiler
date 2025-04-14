@@ -24,6 +24,7 @@
 #include "spinLock.h"
 #include "symbols.h"
 #include "threadFilter.h"
+#include "threadLocalData.h"
 #include "tsc.h"
 #include "vmStructs.h"
 
@@ -57,7 +58,6 @@ static jmethodID _stop_method;
 static jmethodID _box_method;
 
 static const char* const SETTING_CSTACK[] = {NULL, "no", "fp", "dwarf", "lbr", "vm"};
-static const char* const SETTING_CLOCK[] = {NULL, "tsc", "monotonic"};
 
 
 struct CpuTime {
@@ -148,7 +148,7 @@ class Lookup {
         mi->_line_number_table_size = 0;
         mi->_line_number_table = NULL;
 
-        if (name[0] == '_' && name[1] == 'Z') {
+        if (Demangle::needsDemangling(name)) {
             char* demangled = Demangle::demangle(name, false);
             if (demangled != NULL) {
                 mi->_name = _symbols.lookup(demangled);
@@ -187,9 +187,9 @@ class Lookup {
         char* method_name = NULL;
         char* method_sig = NULL;
 
-        if (jvmti->GetMethodDeclaringClass(method, &method_class) == 0 &&
-            jvmti->GetClassSignature(method_class, &class_name, NULL) == 0 &&
-            jvmti->GetMethodName(method, &method_name, &method_sig, NULL) == 0) {
+        if (jvmti->GetMethodName(method, &method_name, &method_sig, NULL) == 0 &&
+            jvmti->GetMethodDeclaringClass(method, &method_class) == 0 &&
+            jvmti->GetClassSignature(method_class, &class_name, NULL) == 0) {
             mi->_class = _classes->lookup(class_name + 1, strlen(class_name) - 2);
             mi->_name = _symbols.lookup(method_name);
             mi->_sig = _symbols.lookup(method_sig);
@@ -555,9 +555,12 @@ class Recording {
         (void)result;
 
         // Workaround for JDK-8191415: compute actual TSC frequency, in case JFR is wrong
-        u64 tsc_frequency = TSC::frequency();
+        u64 tsc_frequency;
         if (TSC::enabled()) {
             tsc_frequency = (u64)(double(_stop_ticks - _start_ticks) / double(_stop_time - _start_time) * 1000000);
+        } else {
+            // TSC is not enabled, so frequency can be used to get the constant clock tick frequency
+            tsc_frequency = TSC::frequency();
         }
 
         // Patch chunk header
@@ -712,13 +715,14 @@ class Recording {
     }
 
     const char* getFeaturesString(char* str, size_t size, StackWalkFeatures f) {
-        snprintf(str, size, "%s %s %s %s %s %s %s %s %s %s",
+        snprintf(str, size, "%s %s %s %s %s %s %s %s %s %s %s",
                  f.unknown_java  ? "unknown_java"  : "-",
                  f.unwind_stub   ? "unwind_stub"   : "-",
                  f.unwind_comp   ? "unwind_comp"   : "-",
                  f.unwind_native ? "unwind_native" : "-",
                  f.java_anchor   ? "java_anchor"   : "-",
                  f.gc_traces     ? "gc_traces"     : "-",
+                 f.stats         ? "stats"         : "-",
                  f.probe_sp      ? "probesp"       : "-",
                  f.vtable_target ? "vtable"        : "-",
                  f.comp_task     ? "comptask"      : "-",
@@ -750,6 +754,8 @@ class Recording {
         buf->put64(_start_time * 1000);  // start time, ns
         buf->put64(0);                   // duration, ns
         buf->put64(_start_ticks);        // start ticks
+        // A frequency here may be inaccurate when using TSC clock.
+        // It will be overwritten with a correct value in finishChunk later.
         buf->put64(TSC::frequency());    // ticks per sec
         buf->put32(1);                   // features
     }
@@ -805,7 +811,7 @@ class Recording {
         writeStringSetting(buf, T_ACTIVE_RECORDING, "version", PROFILER_VERSION);
         writeStringSetting(buf, T_ACTIVE_RECORDING, "engine", Profiler::instance()->_engine->type());
         writeStringSetting(buf, T_ACTIVE_RECORDING, "cstack", SETTING_CSTACK[args._cstack]);
-        writeStringSetting(buf, T_ACTIVE_RECORDING, "clock", SETTING_CLOCK[args._clock]);
+        writeStringSetting(buf, T_ACTIVE_RECORDING, "clock", TSC::enabled() ? "tsc" : "monotonic");
         writeStringSetting(buf, T_ACTIVE_RECORDING, "event", args._event);
         writeStringSetting(buf, T_ACTIVE_RECORDING, "filter", args._filter);
         writeStringSetting(buf, T_ACTIVE_RECORDING, "begin", args._begin);
@@ -1002,6 +1008,20 @@ class Recording {
         writeLogLevels(buf);
     }
 
+    void writePoolHeader(Buffer* buf, JfrType type, u32 size) {
+        if (size > 0) {
+            buf->putVar32(type);
+            buf->putVar32(size);
+        } else {
+            // JDK's built-in JFR reader does not support empty pools.
+            // Write a dummy String pool of 1 element instead.
+            buf->putVar32(T_STRING);
+            buf->putVar32(1);
+            buf->putVar32(1);  // key
+            buf->put8(0);      // null string
+        }
+    }
+
     void writeFrameTypes(Buffer* buf) {
         buf->putVar32(T_FRAME_TYPE);
         buf->putVar32(7);
@@ -1040,8 +1060,7 @@ class Recording {
         std::map<int, jlong>& thread_ids = profiler->_thread_ids;
         char name_buf[32];
 
-        buf->putVar32(T_THREAD);
-        buf->putVar32(threads.size());
+        writePoolHeader(buf, T_THREAD, threads.size());
         for (int i = 0; i < threads.size(); i++) {
             const char* thread_name;
             jlong thread_id;
@@ -1072,8 +1091,7 @@ class Recording {
         std::map<u32, CallTrace*> traces;
         Profiler::instance()->_call_trace_storage.collectTraces(traces);
 
-        buf->putVar32(T_STACK_TRACE);
-        buf->putVar32(traces.size());
+        writePoolHeader(buf, T_STACK_TRACE, traces.size());
         for (std::map<u32, CallTrace*>::const_iterator it = traces.begin(); it != traces.end(); ++it) {
             CallTrace* trace = it->second;
             buf->putVar32(it->first);
@@ -1110,8 +1128,7 @@ class Recording {
             }
         }
 
-        buf->putVar32(T_METHOD);
-        buf->putVar32(marked_count);
+        writePoolHeader(buf, T_METHOD, marked_count);
         for (MethodMap::iterator it = method_map->begin(); it != method_map->end(); ++it) {
             MethodInfo& mi = it->second;
             if (mi._mark) {
@@ -1131,8 +1148,7 @@ class Recording {
         std::map<u32, const char*> classes;
         lookup->_classes->collect(classes);
 
-        buf->putVar32(T_CLASS);
-        buf->putVar32(classes.size());
+        writePoolHeader(buf, T_CLASS, classes.size());
         for (std::map<u32, const char*>::const_iterator it = classes.begin(); it != classes.end(); ++it) {
             const char* name = it->second;
             buf->putVar32(it->first);
@@ -1148,8 +1164,7 @@ class Recording {
         std::map<u32, const char*> packages;
         lookup->_packages.collect(packages);
 
-        buf->putVar32(T_PACKAGE);
-        buf->putVar32(packages.size());
+        writePoolHeader(buf, T_PACKAGE, packages.size());
         for (std::map<u32, const char*>::const_iterator it = packages.begin(); it != packages.end(); ++it) {
             buf->putVar64(it->first | _base_id);
             buf->putVar64(lookup->getSymbol(it->second) | _base_id);
@@ -1161,8 +1176,7 @@ class Recording {
         std::map<u32, const char*> symbols;
         lookup->_symbols.collect(symbols);
 
-        buf->putVar32(T_SYMBOL);
-        buf->putVar32(symbols.size());
+        writePoolHeader(buf, T_SYMBOL, symbols.size());
         for (std::map<u32, const char*>::const_iterator it = symbols.begin(); it != symbols.end(); ++it) {
             flushIfNeeded(buf, RECORDING_BUFFER_LIMIT - MAX_STRING_LENGTH);
             buf->putVar64(it->first | _base_id);
@@ -1231,6 +1245,19 @@ class Recording {
         buf->putVar32(event->_class_id);
         buf->putVar64(event->_total_size);
         writePyroscopeContext(buf);
+        buf->put8(start, buf->offset() - start);
+    }
+
+    void recordMallocSample(Buffer* buf, int tid, u32 call_trace_id, MallocEvent* event) {
+        int start = buf->skip(1);
+        buf->put8(event->_size != 0 ? T_MALLOC : T_FREE);
+        buf->putVar64(event->_start_time);
+        buf->putVar32(tid);
+        buf->putVar32(call_trace_id);
+        buf->putVar64(event->_address);
+        if (event->_size != 0) {
+            buf->putVar64(event->_size);
+        }
         buf->put8(start, buf->offset() - start);
     }
 
@@ -1478,6 +1505,10 @@ void FlightRecorder::stopMasterRecording() {
 void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
                                  EventType event_type, Event* event) {
     if (_rec != NULL) {
+        // Recording an event, increment the sample counter to allow
+        // user code to attach metadata.
+        ThreadLocalData::incrementSampleCounter();
+
         Buffer* buf = _rec->buffer(lock_index);
         switch (event_type) {
             case PERF_SAMPLE:
@@ -1487,6 +1518,9 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
                 break;
             case WALL_CLOCK_SAMPLE:
                 _rec->recordWallClockSample(buf, tid, call_trace_id, (WallClockEvent*)event);
+                break;
+            case MALLOC_SAMPLE:
+                _rec->recordMallocSample(buf, tid, call_trace_id, (MallocEvent*)event);
                 break;
             case ALLOC_SAMPLE:
                 _rec->recordAllocationInNewTLAB(buf, tid, call_trace_id, (AllocEvent*)event);

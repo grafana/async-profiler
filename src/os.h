@@ -70,6 +70,7 @@ class OS {
     static u64 micros();
     static u64 processStartTime();
     static void sleep(u64 nanos);
+    static u64 overrun(siginfo_t* siginfo);
 
     static u64 hton64(u64 x);
     static u64 ntoh64(u64 x);
@@ -84,6 +85,7 @@ class OS {
     static ThreadList* listThreads();
 
     static bool isLinux();
+    static bool isMusl();
 
     static SigAction installSignalHandler(int signo, SigAction action, SigHandler handler = NULL);
     static SigAction replaceCrashHandler(SigAction action);

@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <byteswap.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
 #include <stdio.h>
@@ -98,6 +99,7 @@ static SigAction installed_sigaction[64];
 const size_t OS::page_size = sysconf(_SC_PAGESIZE);
 const size_t OS::page_mask = OS::page_size - 1;
 
+
 u64 OS::nanotime() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -129,6 +131,10 @@ u64 OS::processStartTime() {
 void OS::sleep(u64 nanos) {
     struct timespec ts = {(time_t)(nanos / 1000000000), (long)(nanos % 1000000000)};
     nanosleep(&ts, NULL);
+}
+
+u64 OS::overrun(siginfo_t* siginfo) {
+    return siginfo->si_overrun;
 }
 
 u64 OS::hton64(u64 x) {
@@ -225,6 +231,13 @@ ThreadList* OS::listThreads() {
 
 bool OS::isLinux() {
     return true;
+}
+
+// _CS_GNU_LIBC_VERSION is not defined on musl
+const static bool musl = confstr(_CS_GNU_LIBC_VERSION, NULL, 0) == 0 && errno != 0;
+
+bool OS::isMusl() {
+    return musl;
 }
 
 SigAction OS::installSignalHandler(int signo, SigAction action, SigHandler handler) {

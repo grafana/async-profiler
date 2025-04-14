@@ -13,12 +13,14 @@ import java.util.StringTokenizer;
 import java.util.regex.Pattern;
 
 import static one.convert.Frame.*;
+import static one.convert.ResourceProcessor.*;
 
 public class FlameGraph implements Comparator<Frame> {
     private static final Frame[] EMPTY_FRAME_ARRAY = {};
     private static final String[] FRAME_SUFFIX = {"_[0]", "_[j]", "_[i]", "", "", "_[k]", "_[1]"};
     private static final byte HAS_SUFFIX = (byte) 0x80;
     private static final int FLUSH_THRESHOLD = 15000;
+    private static final Pattern TID_FRAME_PATTERN = Pattern.compile("\\[(.* )?tid=\\d+]");
 
     private final Arguments args;
     private final Index<String> cpool = new Index<>(String.class, "");
@@ -149,7 +151,13 @@ public class FlameGraph implements Comparator<Frame> {
 
         Frame frame = root;
         if (args.reverse) {
-            for (int i = stack.size; --i >= args.skip; ) {
+            // Retain by-thread grouping, unless thread frame is skipped
+            int skip = args.skip;
+            if (skip == 0 && stack.size > 0 && isThreadFrame(stack.names[0], stack.types[0])) {
+                frame = addChild(frame, stack.names[0], stack.types[0], ticks);
+                skip = 1;
+            }
+            for (int i = stack.size; --i >= skip; ) {
                 frame = addChild(frame, stack.names[i], stack.types[i], ticks);
             }
         } else {
@@ -180,8 +188,10 @@ public class FlameGraph implements Comparator<Frame> {
         tail = printTill(out, tail, "/*title:*/");
         out.print(args.title);
 
-        tail = printTill(out, tail, "/*reverse:*/false");
-        out.print(args.reverse);
+        // inverted toggles the layout for reversed stacktraces from icicle to flamegraph
+        // and for default stacktraces from flamegraphs to icicle.
+        tail = printTill(out, tail, "/*inverted:*/false");
+        out.print(args.reverse ^ args.inverted);
 
         tail = printTill(out, tail, "/*depth:*/0");
         out.print(depth);
@@ -197,12 +207,6 @@ public class FlameGraph implements Comparator<Frame> {
         out.print(args.highlight != null ? "'" + escape(args.highlight) + "'" : "");
 
         out.print(tail);
-    }
-
-    private String printTill(PrintStream out, String data, String till) {
-        int index = data.indexOf(till);
-        out.print(data.substring(0, index));
-        return data.substring(index + till.length());
     }
 
     private void printCpool(PrintStream out) {
@@ -355,6 +359,10 @@ public class FlameGraph implements Comparator<Frame> {
         }
     }
 
+    private static boolean isThreadFrame(String name, byte type) {
+        return type == TYPE_NATIVE && name.startsWith("[") && TID_FRAME_PATTERN.matcher(name).matches();
+    }
+
     private static int getCommonPrefix(String a, String b) {
         int length = Math.min(a.length(), b.length());
         for (int i = 0; i < length; i++) {
@@ -375,23 +383,6 @@ public class FlameGraph implements Comparator<Frame> {
         if (s.indexOf('\'') >= 0) s = s.replace("\\'", "'");
         if (s.indexOf('\\') >= 0) s = s.replace("\\\\", "\\");
         return s;
-    }
-
-    private static String getResource(String name) {
-        try (InputStream stream = FlameGraph.class.getResourceAsStream(name)) {
-            if (stream == null) {
-                throw new IOException("No resource found");
-            }
-
-            ByteArrayOutputStream result = new ByteArrayOutputStream();
-            byte[] buffer = new byte[32768];
-            for (int length; (length = stream.read(buffer)) != -1; ) {
-                result.write(buffer, 0, length);
-            }
-            return result.toString("UTF-8");
-        } catch (IOException e) {
-            throw new IllegalStateException("Can't load resource with name " + name);
-        }
     }
 
     @Override
