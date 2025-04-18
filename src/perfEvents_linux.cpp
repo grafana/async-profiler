@@ -45,6 +45,10 @@ struct f_owner_ex {
 };
 #endif // F_SETOWN_EX
 
+// Introduced in kernel 3.14
+#ifndef PERF_FLAG_FD_CLOEXEC
+#define PERF_FLAG_FD_CLOEXEC  8
+#endif // PERF_FLAG_FD_CLOEXEC
 
 enum {
     HW_BREAKPOINT_R  = 1,
@@ -52,7 +56,6 @@ enum {
     HW_BREAKPOINT_RW = 3,
     HW_BREAKPOINT_X  = 4
 };
-
 
 static int fetchInt(const char* file_name) {
     int fd = open(file_name, O_RDONLY);
@@ -150,7 +153,6 @@ static void adjustFDLimit() {
     }
 }
 
-
 struct FunctionWithCounter {
     const char* name;
     int counter_arg;
@@ -208,7 +210,7 @@ struct PerfEventType {
 
         // Parse access type [:rwx]
         c = strrchr(buf, ':');
-        if (c != NULL && c != name && c[-1] != ':') {
+        if (c != NULL && c != buf && c[-1] != ':') {
             *c++ = 0;
             if (strcmp(c, "rw") == 0 || strcmp(c, "wr") == 0) {
                 bp_type = HW_BREAKPOINT_RW;
@@ -529,6 +531,7 @@ PerfEvent* PerfEvents::_events = NULL;
 PerfEventType* PerfEvents::_event_type = NULL;
 bool PerfEvents::_alluser;
 bool PerfEvents::_kernel_stack;
+int PerfEvents::_target_cpu;
 
 int PerfEvents::createForThread(int tid) {
     if (tid >= _max_events) {
@@ -589,9 +592,13 @@ int PerfEvents::createForThread(int tid) {
 
     int fd;
     if (FdTransferClient::hasPeer()) {
-        fd = FdTransferClient::requestPerfFd(&tid, &attr);
+        fd = FdTransferClient::requestPerfFd(&tid, _target_cpu, &attr);
     } else {
-        fd = syscall(__NR_perf_event_open, &attr, tid, -1, -1, 0);
+        fd = syscall(__NR_perf_event_open, &attr, tid, _target_cpu, -1, PERF_FLAG_FD_CLOEXEC);
+        if (fd == -1 && errno == EINVAL) {
+            // Try again without CLOEXEC, it's not supported in very old kernels
+            fd = syscall(__NR_perf_event_open, &attr, tid, _target_cpu, -1, 0);
+        }
     }
 
     if (fd == -1) {
@@ -768,7 +775,7 @@ Error PerfEvents::check(Arguments& args) {
     }
 #endif
 
-    int fd = syscall(__NR_perf_event_open, &attr, 0, -1, -1, 0);
+    int fd = syscall(__NR_perf_event_open, &attr, 0, args._target_cpu, -1, 0);
     if (fd == -1) {
         return Error(strerror(errno));
     }
@@ -789,12 +796,15 @@ Error PerfEvents::start(Arguments& args) {
         return Error("Could not set pthread hook");
     }
 
+    _target_cpu = args._target_cpu;
+
     if (args._interval < 0) {
         return Error("interval must be positive");
     }
     _interval = args._interval ? args._interval : _event_type->default_interval;
     _cstack = args._cstack;
     _signal = args._signal == 0 ? OS::getProfilingSignal(0) : args._signal & 0xff;
+    _count_overrun = false;
 
     _alluser = args._alluser;
     _kernel_stack = !_alluser && _cstack != CSTACK_NO;
@@ -817,7 +827,6 @@ Error PerfEvents::start(Arguments& args) {
     }
 
     if (VM::isOpenJ9()) {
-        if (_cstack == CSTACK_DEFAULT) _cstack = CSTACK_DWARF;
         OS::installSignalHandler(_signal, signalHandlerJ9);
         Error error = J9StackTraces::start(args);
         if (error) {

@@ -71,7 +71,7 @@ class Node {
     u32 _order;
     const Trie* _trie;
 
-    Node(u32 key, u32 order, const Trie& trie) : _key(key), _order(order), _trie(&trie) {
+    Node(u32 key, u32 order, const Trie* trie) : _key(key), _order(order), _trie(trie) {
     }
 
     static bool orderByName(const Node& a, const Node& b) {
@@ -147,8 +147,10 @@ void FlameGraph::dump(Writer& out, bool tree) {
         tail = printTill(out, tail, "/*title:*/");
         out << _title;
 
-        tail = printTill(out, tail, "/*reverse:*/false");
-        out << (_reverse ? "true" : "false");
+        tail = printTill(out, tail, "/*inverted:*/false");
+        // _inverted toggles the layout for reversed stacktraces from icicle to flamegraph
+        // and for default stacktraces from flamegraphs to icicle.
+        out << (_reverse ^ _inverted ? "true" : "false");
 
         tail = printTill(out, tail, "/*depth:*/0");
         out << depth;
@@ -201,7 +203,7 @@ void FlameGraph::printFrame(Writer& out, u32 key, const Trie& f, int level, u64 
 
     std::vector<Node> children;
     children.reserve(f._children.size());
-    for (std::map<u32, Trie>::const_iterator it = f._children.begin(); it != f._children.end(); ++it) {
+    for (auto it = f._children.begin(); it != f._children.end(); ++it) {
         children.push_back(Node(it->first, _name_order[f.nameIndex(it->first)], it->second));
     }
     std::sort(children.begin(), children.end(), Node::orderByName);
@@ -220,7 +222,7 @@ void FlameGraph::printFrame(Writer& out, u32 key, const Trie& f, int level, u64 
 void FlameGraph::printTreeFrame(Writer& out, const Trie& f, int level, const char** names) {
     std::vector<Node> children;
     children.reserve(f._children.size());
-    for (std::map<u32, Trie>::const_iterator it = f._children.begin(); it != f._children.end(); ++it) {
+    for (auto it = f._children.begin(); it != f._children.end(); ++it) {
         children.push_back(Node(it->first, 0, it->second));
     }
     std::sort(children.begin(), children.end(), Node::orderByTotal);

@@ -8,3 +8,4 @@ cmake-build-debug/
 .vscode
 *.iml
 /src/api/**/*.class
+.gdb_history

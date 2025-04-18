@@ -5,13 +5,15 @@
 
 #ifdef __linux__
 
-#include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
 #include <unistd.h>
@@ -22,6 +24,7 @@
 #include "dwarf.h"
 #include "fdtransferClient.h"
 #include "log.h"
+#include "os.h"
 
 
 #ifdef __x86_64__
@@ -118,6 +121,13 @@ class MemoryMapDesc {
       }
 };
 
+struct SharedLibrary {
+    char* file;
+    const char* map_start;
+    const char* map_end;
+    const char* image_base;
+};
+
 
 #ifdef __LP64__
 const unsigned char ELFCLASS_SUPPORTED = ELFCLASS64;
@@ -145,28 +155,34 @@ typedef Elf32_Dyn  ElfDyn;
 
 #if defined(__x86_64__)
 #  define R_GLOB_DAT R_X86_64_GLOB_DAT
+#  define R_ABS64 R_X86_64_64
 #elif defined(__i386__)
 #  define R_GLOB_DAT R_386_GLOB_DAT
+#  define R_ABS64 -1
 #elif defined(__arm__) || defined(__thumb__)
 #  define R_GLOB_DAT R_ARM_GLOB_DAT
+#  define R_ABS64 -1
 #elif defined(__aarch64__)
 #  define R_GLOB_DAT R_AARCH64_GLOB_DAT
+#  define R_ABS64 R_AARCH64_ABS64
 #elif defined(__PPC64__)
 #  define R_GLOB_DAT R_PPC64_GLOB_DAT
+#  define R_ABS64 -1
 #elif defined(__riscv) && (__riscv_xlen == 64)
 // RISC-V does not have GLOB_DAT relocation, use something neutral,
 // like the impossible relocation number.
 #  define R_GLOB_DAT -1
+#  define R_ABS64 -1
 #elif defined(__loongarch_lp64)
 // LOONGARCH does not have GLOB_DAT relocation, use something neutral,
 // like the impossible relocation number.
 #  define R_GLOB_DAT -1
+#  define R_ABS64 -1
 #else
 #  error "Compiling on unsupported arch"
 #endif
 
 
-static bool musl = false;
 static char _debuginfod_cache_buf[PATH_MAX] = {0};
 
 class ElfParser {
@@ -208,7 +224,7 @@ class ElfParser {
     }
 
     const char* base() {
-        return _header->e_type == ET_EXEC ? NULL : _base;
+        return _header->e_type == ET_EXEC ? NULL : _vaddr_diff;
     }
 
     char* dyn_ptr(ElfDyn* dyn) {
@@ -286,6 +302,7 @@ bool ElfParser::parseFile(CodeCache* cc, const char* base, const char* file_name
     } else {
         ElfParser elf(cc, base, addr, file_name, false);
         if (elf.validHeader()) {
+            elf.calcVirtualLoadAddress();
             elf.loadSymbols(use_debug);
         }
         munmap(addr, length);
@@ -394,17 +411,20 @@ void ElfParser::parseDynamicSection() {
                     _cc->addImport((void**)(base + r->r_offset), strtab + sym->st_name);
                 }
             }
-        } else if (rel != NULL && relsz != 0) {
-            // Shared library was built without PLT (-fno-plt)
-            // Relocation entries have been moved from .rela.plt to .rela.dyn
+        }
+
+        if (rel != NULL && relsz != 0) {
+            // Relocation entries for imports can be found in .rela.dyn, for example
+            // if a shared library is built without PLT (-fno-plt). However, if both
+            // entries exist, addImport saves them both.
             for (size_t offs = relcount * relent; offs < relsz; offs += relent) {
                 ElfRelocation* r = (ElfRelocation*)(rel + offs);
-                if (ELF_R_TYPE(r->r_info) == R_GLOB_DAT) {
+                if (ELF_R_TYPE(r->r_info) == R_GLOB_DAT || ELF_R_TYPE(r->r_info) == R_ABS64) {
                     ElfSymbol* sym = (ElfSymbol*)(symtab + ELF_R_SYM(r->r_info) * syment);
                     if (sym->st_name != 0) {
                         _cc->addImport((void**)(base + r->r_offset), strtab + sym->st_name);
                     }
-               }
+                }
             }
         }
     }
@@ -461,7 +481,7 @@ void ElfParser::loadSymbols(bool use_debug) {
             _cc->setPlt(plt->sh_addr, plt->sh_size);
             ElfSection* reltab = findSection(SHT_RELA, ".rela.plt");
             if (reltab != NULL || (reltab = findSection(SHT_REL, ".rel.plt")) != NULL) {
-                addRelocationSymbols(reltab, _base + plt->sh_addr + PLT_HEADER_SIZE);
+                addRelocationSymbols(reltab, base() + plt->sh_addr + PLT_HEADER_SIZE);
             }
         }
     }
@@ -631,8 +651,8 @@ void ElfParser::addRelocationSymbols(ElfSection* reltab, const char* plt) {
 
 Mutex Symbols::_parse_lock;
 bool Symbols::_have_kernel_symbols = false;
-static std::set<const void*> _parsed_libraries;
-static std::set<u64> _parsed_inodes;
+bool Symbols::_libs_limit_reported = false;
+static std::unordered_set<u64> _parsed_inodes;
 
 void Symbols::parseKernelSymbols(CodeCache* cc) {
     int fd;
@@ -679,22 +699,19 @@ void Symbols::parseKernelSymbols(CodeCache* cc) {
     fclose(f);
 }
 
-static int parseLibrariesCallback(struct dl_phdr_info* info, size_t size, void* data) {
+static void collectSharedLibraries(std::unordered_map<u64, SharedLibrary>& libs, int max_count) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (f == NULL) {
-        return 1;
+        return;
     }
 
-    CodeCacheArray* array = (CodeCacheArray*)data;
-    CodeCache* cc = NULL;
     const char* image_base = NULL;
     u64 last_inode = 0;
-    u64 cc_inode = 0;
     char* str = NULL;
     size_t str_size = 0;
     ssize_t len;
 
-    while ((len = getline(&str, &str_size, f)) > 0) {
+    while (max_count > 0 && (len = getline(&str, &str_size, f)) > 0) {
         str[len - 1] = 0;
 
         MemoryMapDesc map(str);
@@ -702,71 +719,45 @@ static int parseLibrariesCallback(struct dl_phdr_info* info, size_t size, void* 
             continue;
         }
 
-        const char* map_start = map.addr();
-        unsigned long map_offs = map.offs();
-
-        if (map_offs == 0) {
-            image_base = map_start;
-            last_inode = u64(map.dev()) << 32 | map.inode();
-        }
-
-        if (!map.isExecutable() || !_parsed_libraries.insert(map_start).second) {
-            // Not an executable segment or it has been already parsed
-            continue;
-        }
-
-        const char* map_end = map.end();
         u64 inode = u64(map.dev()) << 32 | map.inode();
-        if (inode != 0 && !_parsed_inodes.insert(inode).second) {
-            // Do not parse the same executable twice
-            if (inode == cc_inode) {
-                cc->updateBounds(map_start, map_end);
+        if (_parsed_inodes.find(inode) != _parsed_inodes.end()) {
+            continue;  // shared object is already parsed
+        }
+        if (inode == 0 && strcmp(map.file(), "[vdso]") != 0) {
+            continue;  // all shared libraries have inode, except vDSO
+        }
+
+        const char* map_start = map.addr();
+        const char* map_end = map.end();
+        if (inode != last_inode && map.offs() == 0) {
+            image_base = map_start;
+            last_inode = inode;
+        }
+
+        if (map.isExecutable()) {
+            SharedLibrary& lib = libs[inode];
+            if (lib.file == nullptr) {
+                lib.file = strdup(map.file());
+                lib.map_start = map_start;
+                lib.map_end = map_end;
+                lib.image_base = inode == last_inode ? image_base : NULL;
+                max_count--;
+            } else {
+                // The same library may have multiple executable segments mapped
+                lib.map_end = map_end;
             }
-            continue;
         }
-
-        int count = array->count();
-        if (count >= MAX_NATIVE_LIBS) {
-            break;
-        }
-
-        cc = new CodeCache(map.file(), count, false, map_start, map_end);
-        cc_inode = inode;
-
-        if (strchr(map.file(), ':') != NULL) {
-            // Do not try to parse pseudofiles like anon_inode:name, /memfd:name
-        } else if (inode != 0) {
-            if (inode == last_inode) {
-                // If last_inode is set, image_base is known to be valid and readable
-                ElfParser::parseFile(cc, image_base, map.file(), true);
-                // Parse program headers after the file to ensure debug symbols are parsed first
-                ElfParser::parseProgramHeaders(cc, image_base, map_end, musl);
-            } else if ((unsigned long)map_start > map_offs) {
-                // Unlikely case when image_base has not been found.
-                // Be careful: executable file is not always ELF, e.g. classes.jsa
-                ElfParser::parseFile(cc, map_start - map_offs, map.file(), true);
-            }
-        } else if (strcmp(map.file(), "[vdso]") == 0) {
-            ElfParser::parseProgramHeaders(cc, map_start, map_end, true);
-        }
-
-        cc->sort();
-        applyPatch(cc);
-        array->add(cc);
     }
 
     free(str);
     fclose(f);
-
-    return 1;
 }
 
 void Symbols::parseLibraries(CodeCacheArray* array, bool kernel_symbols) {
     MutexLocker ml(_parse_lock);
 
-    if (array->count() == 0) {
-        // _CS_GNU_LIBC_VERSION is not defined on musl
-        musl = confstr(_CS_GNU_LIBC_VERSION, NULL, 0) == 0 && errno != 0;
+    if (array->count() >= MAX_NATIVE_LIBS) {
+        return;
     }
 
     if (kernel_symbols && !haveKernelSymbols()) {
@@ -781,10 +772,59 @@ void Symbols::parseLibraries(CodeCacheArray* array, bool kernel_symbols) {
         }
     }
 
-    // In glibc, dl_iterate_phdr() holds dl_load_write_lock, therefore preventing
-    // concurrent loading and unloading of shared libraries.
-    // Without it, we may access memory of a library that is being unloaded.
-    dl_iterate_phdr(parseLibrariesCallback, array);
+    std::unordered_map<u64, SharedLibrary> libs;
+    collectSharedLibraries(libs, MAX_NATIVE_LIBS - array->count());
+
+    for (auto& it : libs) {
+        u64 inode = it.first;
+        _parsed_inodes.insert(inode);
+
+        SharedLibrary& lib = it.second;
+        CodeCache* cc = new CodeCache(lib.file, array->count(), false, lib.map_start, lib.map_end);
+
+        // Strip " (deleted)" suffix so that removed library can be reopened
+        size_t len = strlen(lib.file);
+        if (len > 10 && strcmp(lib.file + len - 10, " (deleted)") == 0) {
+            lib.file[len - 10] = 0;
+        }
+
+        if (strchr(lib.file, ':') != NULL) {
+            // Do not try to parse pseudofiles like anon_inode:name, /memfd:name
+        } else if (strcmp(lib.file, "[vdso]") == 0) {
+            ElfParser::parseProgramHeaders(cc, lib.map_start, lib.map_end, true);
+        } else if (lib.image_base == NULL) {
+            // Unlikely case when image base has not been found: not safe to access program headers.
+            // Be careful: executable file is not always ELF, e.g. classes.jsa
+            ElfParser::parseFile(cc, lib.map_start, lib.file, true);
+        } else {
+            // Parse debug symbols first
+            ElfParser::parseFile(cc, lib.image_base, lib.file, true);
+
+            dlerror();  // reset any error from previous dl function calls
+
+            // Protect library from unloading while parsing in-memory ELF program headers.
+            // Also, dlopen() ensures the library is fully loaded.
+            // Main executable and ld-linux interpreter cannot be dlopen'ed, but dlerror() returns NULL for them.
+            void* handle = dlopen(lib.file, RTLD_LAZY | RTLD_NOLOAD);
+            if (handle != NULL || dlerror() == NULL) {
+                ElfParser::parseProgramHeaders(cc, lib.image_base, lib.map_end, OS::isMusl());
+                if (handle != NULL) {
+                    dlclose(handle);
+                }
+            }
+        }
+
+        free(lib.file);
+
+        cc->sort();
+        applyPatch(cc);
+        array->add(cc);
+    }
+
+    if (array->count() >= MAX_NATIVE_LIBS && !_libs_limit_reported) {
+        Log::warn("Number of parsed libraries reached the limit of %d", MAX_NATIVE_LIBS);
+        _libs_limit_reported = true;
+    }
 }
 
 #endif // __linux__

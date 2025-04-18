@@ -9,7 +9,6 @@ import one.jfr.JfrReader;
 import one.jfr.StackTrace;
 import one.jfr.event.AllocationSample;
 import one.jfr.event.Event;
-import one.jfr.event.EventAggregator;
 
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -30,8 +29,8 @@ public class JfrToFlame extends JfrConverter {
     }
 
     @Override
-    protected void convertChunk() throws IOException {
-        collectEvents().forEach(new EventAggregator.ValueVisitor() {
+    protected void convertChunk() {
+        collector.forEach(new AggregatedEventVisitor() {
             final CallStack stack = new CallStack();
 
             @Override
