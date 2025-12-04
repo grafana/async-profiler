@@ -117,9 +117,18 @@ jfrconv --total --nativemem --leak app.jfr app-leak.html
 jfrconv --total --nativemem app.jfr app-malloc.html
 ```
 
-When `--leak` option is used, the generated flame graph will show allocations without matching `free` calls. If `-nofree` is specified, every allocation will be reported as a leak:
+When `--leak` option is used, the generated flame graph will show allocations without matching `free` calls.
 
 ![nativemem flamegraph](../.assets/images/nativemem_flamegraph.png)
+
+To avoid bias towards youngest allocations not freed by the end of the profiling session,
+leak profiler ignores tail allocations made in the last 10% of the profiling period.
+Tail length can be altered with `--tail` option that accepts `ratio` or `percent%` as an argument.
+For example, to ignore allocations in the last 2 minutes of a 10 minutes profile, use
+
+```
+jfrconv --nativemem --leak --tail 20% app.jfr app-leak.html
+```
 
 The overhead of `nativemem` profiling depends on the number of native allocations,
 but is usually small enough even for production use. If required, the overhead can be reduced
@@ -136,7 +145,7 @@ Run an application with `nativemem` profiler that dumps recordings in JFR format
 LD_PRELOAD=/path/to/libasyncProfiler.so ASPROF_COMMAND=start,nativemem,total,loop=10m,cstack=dwarf,file=profile-%t.jfr NativeApp [args]
 ```
 
-Then run `jfrconv` to generate memory leak reports as flame graphs:
+Then run `jfrconv` to generate memory leak report as a flame graph:
 
 ```
 jfrconv --total --nativemem --leak <profile>.jfr <profile>-leak.html
@@ -180,9 +189,14 @@ of all compiled methods. The subsequent instrumentation flushes only the _depend
 
 The massive CodeCache flush doesn't occur if attaching async-profiler as an agent.
 
-### Java native method profiling
+### Latency profiling
 
-Here are some useful native methods to profile:
+Please refer to our blog post on [latency profiling](https://github.com/async-profiler/async-profiler/discussions/1497)
+to know more about this profiling mode.
+
+## Native function profiling
+
+Here are some useful native functions to profile:
 
 - `G1CollectedHeap::humongous_obj_allocate` - trace _humongous allocations_ of the G1 GC,
 - `JVM_StartThread` - trace creation of new Java threads,
@@ -219,6 +233,40 @@ The same, when starting profiler as an agent:
 
 ```
 -agentpath:/path/to/libasyncProfiler.so=start,event=cpu,alloc=2m,lock=10ms,file=profile.jfr
+```
+
+### Multi-event profiling using `--all`
+
+The `--all` flag offers a way to simultaneously enable predefined collection of common profiling events. By default, `--all` activates profiling for `cpu`, `wall`, `alloc`, `live`, `lock` and `nativemem`.
+
+**Important consideration**
+
+While the `--all` flag can be useful for development environments to get a wide overview, it is not recommended to enable this in production, especially for continuous profiling. Users are invited to select carefully what to profile and with what settings.
+
+**Sample command:**
+
+This command enables the default set of events included in `--all`:
+
+```
+asprof --all -f profile.jfr
+```
+
+or combine it with `--alloc`/`--wall`/`--lock`/`--nativemem` options to override individual settings. For example:
+
+```
+asprof --all --alloc 2m --lock 10ms -f profile.jfr
+```
+
+The same, when starting profiler as an agent:
+
+```
+-agentpath:/path/to/libasyncProfiler.so=start,all,alloc=2m,lock=10ms,file=profile.jfr
+```
+
+Instead of `cpu`, it is possible to override the `--all` parameter with any other event type of your choice. For instance, the following command will profile `cycles` along with ` wall`, `alloc`, `live`, `lock` and `nativemem`:
+
+```
+asprof --all -e cycles -f profile.jfr
 ```
 
 ## Continuous profiling

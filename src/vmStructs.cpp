@@ -20,6 +20,7 @@ bool VMStructs::_has_stack_structs = false;
 bool VMStructs::_has_class_loader_data = false;
 bool VMStructs::_has_native_thread_id = false;
 bool VMStructs::_has_perm_gen = false;
+bool VMStructs::_can_dereference_jmethod_id = false;
 bool VMStructs::_compact_object_headers = false;
 
 int VMStructs::_klass_name_offset = -1;
@@ -44,10 +45,13 @@ int VMStructs::_comp_method_offset = -1;
 int VMStructs::_anchor_sp_offset = -1;
 int VMStructs::_anchor_pc_offset = -1;
 int VMStructs::_anchor_fp_offset = -1;
+int VMStructs::_blob_size_offset = -1;
 int VMStructs::_frame_size_offset = -1;
 int VMStructs::_frame_complete_offset = -1;
 int VMStructs::_code_offset = -1;
 int VMStructs::_data_offset = -1;
+int VMStructs::_mutable_data_offset = -1;
+int VMStructs::_relocation_size_offset = -1;
 int VMStructs::_scopes_pcs_offset = -1;
 int VMStructs::_scopes_data_offset = -1;
 int VMStructs::_nmethod_name_offset = -1;
@@ -109,6 +113,8 @@ jfieldID VMStructs::_eetop;
 jfieldID VMStructs::_tid;
 jfieldID VMStructs::_klass = NULL;
 int VMStructs::_tls_index = -1;
+intptr_t VMStructs::_env_offset = -1;
+void* VMStructs::_java_thread_vtbl[6];
 
 VMStructs::LockFunc VMStructs::_lock_func;
 VMStructs::LockFunc VMStructs::_unlock_func;
@@ -291,7 +297,9 @@ void VMStructs::initOffsets() {
                     _anchor_fp_offset = *(int*)(entry + offset_offset);
                 }
             } else if (strcmp(type, "CodeBlob") == 0) {
-                if (strcmp(field, "_frame_size") == 0) {
+                if (strcmp(field, "_size") == 0) {
+                    _blob_size_offset = *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_frame_size") == 0) {
                     _frame_size_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_frame_complete_offset") == 0) {
                     _frame_complete_offset = *(int*)(entry + offset_offset);
@@ -301,6 +309,10 @@ void VMStructs::initOffsets() {
                     _code_offset = - *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_data_offset") == 0) {
                     _data_offset = *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_mutable_data") == 0) {
+                    _mutable_data_offset = *(int*)(entry + offset_offset);
+                } else if (strcmp(field, "_relocation_size") == 0) {
+                    _relocation_size_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_name") == 0) {
                     _nmethod_name_offset = *(int*)(entry + offset_offset);
                 }
@@ -478,12 +490,15 @@ void VMStructs::resolveOffsets() {
             && _klass != NULL
             && _lock_func != NULL && _unlock_func != NULL;
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__i386__)
     _interpreter_frame_bcp_offset = VM::hotspot_version() >= 11 ? -8 : VM::hotspot_version() == 8 ? -7 : 0;
 #elif defined(__aarch64__)
     _interpreter_frame_bcp_offset = VM::hotspot_version() >= 11 ? -9 : VM::hotspot_version() == 8 ? -7 : 0;
     // The constant is missing on ARM, but fortunately, it has been stable for years across all JDK versions
     _entry_frame_call_wrapper_offset = -64;
+#elif defined(__arm__) || defined(__thumb__)
+    _interpreter_frame_bcp_offset = VM::hotspot_version() >= 11 ? -8 : 0;
+    _entry_frame_call_wrapper_offset = 0;
 #endif
 
     // JDK-8292758 has slightly changed ScopeDesc encoding
@@ -508,10 +523,13 @@ void VMStructs::resolveOffsets() {
             && _data_offset >= 0
             && _scopes_data_offset != -1
             && _scopes_pcs_offset >= 0
-            && _nmethod_metadata_offset >= 0
+            && ((_mutable_data_offset >= 0 && _relocation_size_offset >= 0) || _nmethod_metadata_offset >= 0)
             && _thread_vframe_offset >= 0
             && _thread_exception_offset >= 0
             && _constmethod_size >= 0;
+
+    // Since JDK-8268406, it is no longer possible to get VMMethod* by dereferencing jmethodID
+    _can_dereference_jmethod_id = _has_method_structs && VM::hotspot_version() <= 25;
 
     if (_code_heap_addr != NULL && _code_heap_low_addr != NULL && _code_heap_high_addr != NULL) {
         char* code_heaps = *_code_heap_addr;
@@ -569,7 +587,7 @@ void VMStructs::patchSafeFetch() {
     } else if (WX_MEMORY && VM::hotspot_version() == 11) {
         void** entry = (void**)_libjvm->findSymbol("_ZN12StubRoutines17_safefetchN_entryE");
         if (entry != NULL) {
-            *entry = (void*)SafeAccess::loadPtr;
+            *entry = (void*)SafeAccess::load;
         }
     }
 }
@@ -613,6 +631,8 @@ void VMStructs::initThreadBridge() {
         if (vm_thread != NULL) {
             _has_native_thread_id = _thread_osthread_offset >= 0 && _osthread_id_offset >= 0;
             initTLS(vm_thread);
+            _env_offset = (intptr_t)env - (intptr_t)vm_thread;
+            memcpy(_java_thread_vtbl, vm_thread->vtable(), sizeof(_java_thread_vtbl));
         }
     }
 }
@@ -627,6 +647,22 @@ int VMThread::nativeThreadId(JNIEnv* jni, jthread thread) {
         return vm_thread != NULL ? vm_thread->osThreadId() : -1;
     }
     return VM::isOpenJ9() ? J9Ext::GetOSThreadID(thread) : -1;
+}
+
+int VMThread::osThreadId() {
+    const char* osthread = *(const char**) at(_thread_osthread_offset);
+    if (osthread != NULL) {
+        // Java thread may be in the middle of termination, and its osthread structure just released
+        return SafeAccess::load32((int32_t*)(osthread + _osthread_id_offset), -1);
+    }
+    return -1;
+}
+
+JNIEnv* VMThread::jni() {
+    if (_env_offset < 0) {
+        return VM::jni();  // fallback for non-HotSpot JVM
+    }
+    return isJavaThread() ? (JNIEnv*) at(_env_offset) : NULL;
 }
 
 jmethodID VMMethod::id() {
@@ -646,6 +682,14 @@ jmethodID VMMethod::id() {
                 return ids[num + 1];
             }
         }
+    }
+    return NULL;
+}
+
+jmethodID VMMethod::validatedId() {
+    jmethodID method_id = id();
+    if (!_can_dereference_jmethod_id || (goodPtr(method_id) && *(VMMethod**)method_id == this)) {
+        return method_id;
     }
     return NULL;
 }

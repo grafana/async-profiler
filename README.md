@@ -23,12 +23,12 @@ to learn about more features.
 
 # Download
 
-### Stable release: [3.0](https://github.com/async-profiler/async-profiler/releases/tag/v3.0)
+### Stable release: [4.2](https://github.com/async-profiler/async-profiler/releases/tag/v4.2)
 
-- Linux x64: [async-profiler-3.0-linux-x64.tar.gz](https://github.com/async-profiler/async-profiler/releases/download/v3.0/async-profiler-3.0-linux-x64.tar.gz)
-- Linux arm64: [async-profiler-3.0-linux-arm64.tar.gz](https://github.com/async-profiler/async-profiler/releases/download/v3.0/async-profiler-3.0-linux-arm64.tar.gz)
-- macOS x64/arm64: [async-profiler-3.0-macos.zip](https://github.com/async-profiler/async-profiler/releases/download/v3.0/async-profiler-3.0-macos.zip)
-- Profile converters: [converter.jar](https://github.com/async-profiler/async-profiler/releases/download/v3.0/converter.jar)
+- Linux x64: [async-profiler-4.2-linux-x64.tar.gz](https://github.com/async-profiler/async-profiler/releases/download/v4.2/async-profiler-4.2-linux-x64.tar.gz)
+- Linux arm64: [async-profiler-4.2-linux-arm64.tar.gz](https://github.com/async-profiler/async-profiler/releases/download/v4.2/async-profiler-4.2-linux-arm64.tar.gz)
+- macOS arm64/x64: [async-profiler-4.2-macos.zip](https://github.com/async-profiler/async-profiler/releases/download/v4.2/async-profiler-4.2-macos.zip)
+- Profile converters: [jfr-converter.jar](https://github.com/async-profiler/async-profiler/releases/download/v4.2/jfr-converter.jar)
 
 ### Nightly builds
 

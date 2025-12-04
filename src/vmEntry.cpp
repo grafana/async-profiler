@@ -32,13 +32,16 @@ int VM::_hotspot_version = 0;
 bool VM::_openj9 = false;
 bool VM::_zing = false;
 
+bool VM::_terminating = false;
+
+GetCreatedJavaVMs VM::_getCreatedJavaVMs = NULL;
+
 jvmtiError (JNICALL *VM::_orig_RedefineClasses)(jvmtiEnv*, jint, const jvmtiClassDefinition*);
 jvmtiError (JNICALL *VM::_orig_RetransformClasses)(jvmtiEnv*, jint, const jclass* classes);
 
 AsyncGetCallTrace VM::_asyncGetCallTrace;
 JVM_MemoryFunc VM::_totalMemory;
 JVM_MemoryFunc VM::_freeMemory;
-
 
 static bool isVmRuntimeEntry(const char* blob_name) {
     return strcmp(blob_name, "_ZNK12MemAllocator8allocateEv") == 0
@@ -95,7 +98,8 @@ static bool isOpenJ9JvmtiAlloc(const char* blob_name) {
 }
 
 static bool isCompilerEntry(const char* blob_name) {
-    return strncmp(blob_name, "_ZN13CompileBroker25invoke_compiler_on_method", 45) == 0;
+    return strncmp(blob_name, "_ZN8Compiler14compile_method", 28) == 0 ||
+           strncmp(blob_name, "_ZN10C2Compiler14compile_method", 31) == 0;
 }
 
 static void* resolveMethodId(void** mid) {
@@ -106,6 +110,30 @@ static void* resolveMethodIdEnd() {
     return NULL;
 }
 
+// Workaround for JDK-8308341: since JNI_GetCreatedJavaVMs may return an uninitialized JVM,
+// we verify the readiness of the JVM by presence of "VM Thread" and "Service Thread".
+bool VM::hasJvmThreads() {
+    char thread_name[32];
+    int threads_found = 0;
+
+    ThreadList* list = OS::listThreads();
+    while (list->hasNext() && threads_found != 3) {
+        if (!OS::threadName(list->next(), thread_name, sizeof(thread_name))) {
+            continue;
+        }
+
+        // On macOS, Java thread names start with "Java: "
+        int thread_name_offset = strncmp(thread_name, "Java: ", 6) == 0 ? 6 : 0;
+
+        if (strcmp(thread_name + thread_name_offset, "VM Thread") == 0) {
+            threads_found |= 1;
+        } else if (strcmp(thread_name + thread_name_offset, "Service Thread") == 0) {
+            threads_found |= 2;
+        }
+    }
+
+    return threads_found == 3;
+}
 
 bool VM::init(JavaVM* vm, bool attach) {
     if (_jvmti != NULL) return true;
@@ -275,6 +303,38 @@ bool VM::init(JavaVM* vm, bool attach) {
     return true;
 }
 
+// Try to find a running JVM instance and attach to it
+void VM::tryAttach() {
+    if (_getCreatedJavaVMs == NULL) {
+        void* lib_handle = dlopen(OS::isLinux() ? "libjvm.so" : "libjvm.dylib", RTLD_LAZY | RTLD_NOLOAD);
+        if (lib_handle != NULL) {
+            _getCreatedJavaVMs = (GetCreatedJavaVMs)dlsym(lib_handle, "JNI_GetCreatedJavaVMs");
+            dlclose(lib_handle);
+        }
+        if (_getCreatedJavaVMs == NULL) {
+            return;
+        }
+    }
+
+    JavaVM* vm;
+    jsize nVMs;
+    if (_getCreatedJavaVMs(&vm, 1, &nVMs) != JNI_OK || nVMs != 1) {
+        return;
+    }
+
+    JNIEnv* env;
+    jint get_env_result = vm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (get_env_result == JNI_OK) {
+        // Current thread already belongs to the running JVM
+        VM::init(vm, true);
+    } else if (get_env_result == JNI_EDETACHED) {
+        // There is a running JVM, but we need to check it is initialized
+        if (hasJvmThreads() && vm->AttachCurrentThreadAsDaemon((void**)&env, NULL) == JNI_OK) {
+            VM::init(vm, true);
+        }
+    }
+}
+
 // Run late initialization when JVM is ready
 void VM::ready() {
     Profiler::setupSignalHandlers();
@@ -297,10 +357,10 @@ void VM::applyPatch(char* func, const char* patch, const char* end_patch) {
     uintptr_t start_page = (uintptr_t)func & ~OS::page_mask;
     uintptr_t end_page = ((uintptr_t)func + size + OS::page_mask) & ~OS::page_mask;
 
-    if (mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+    if (OS::mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
         memcpy(func, patch, size);
         __builtin___clear_cache(func, func + size);
-        mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_EXEC);
+        OS::mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_EXEC);
     }
 }
 
@@ -361,6 +421,7 @@ void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
 }
 
 void JNICALL VM::VMDeath(jvmtiEnv* jvmti, JNIEnv* jni) {
+    _terminating = true;
     Profiler::instance()->shutdown(_global_args);
 }
 

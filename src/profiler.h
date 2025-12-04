@@ -8,7 +8,6 @@
 
 #include <map>
 #include <string>
-#include <time.h>
 #include "arch.h"
 #include "arguments.h"
 #include "callTraceStorage.h"
@@ -61,7 +60,6 @@ class Profiler {
     std::map<int, jlong> _thread_ids;
 
     Dictionary _class_map;
-    Dictionary _symbol_map;
     ThreadFilter _thread_filter;
     CallTraceStorage _call_trace_storage;
     FlightRecorder _jfr;
@@ -69,8 +67,8 @@ class Profiler {
     Engine* _alloc_engine;
     int _event_mask;
 
-    time_t _start_time;
-    time_t _stop_time;
+    u64 _start_time;
+    u64 _stop_time;
     int _epoch;
     u32 _gc_id;
     WaitableMutex _timer_lock;
@@ -88,6 +86,7 @@ class Profiler {
     bool _add_event_frame;
     bool _add_thread_frame;
     bool _add_sched_frame;
+    bool _add_cpu_frame;
     bool _update_thread_names;
     volatile jvmtiEventMode _thread_events_state;
 
@@ -130,7 +129,7 @@ class Profiler {
     Engine* activeEngine();
     Error checkJvmCapabilities();
 
-    time_t addTimeout(time_t start, int timeout);
+    u64 addTimeout(u64 start_micros, int timeout);
     void startTimer();
     void stopTimer();
     void timerLoop(void* timer_id);
@@ -152,6 +151,7 @@ class Profiler {
     void dumpCollapsed(Writer& out, Arguments& args);
     void dumpFlameGraph(Writer& out, Arguments& args, bool tree);
     void dumpText(Writer& out, Arguments& args);
+    void dumpOtlp(Writer& out, Arguments& args);
 
     static Profiler* const _instance;
 
@@ -186,7 +186,7 @@ class Profiler {
     }
 
     u64 total_samples() { return _total_samples; }
-    long uptime()       { return time(NULL) - _start_time; }
+    long uptime()       { return (OS::micros() - _start_time) / 1000000ULL; }
 
     Dictionary* classMap() { return &_class_map; }
     ThreadFilter* threadFilter() { return &_thread_filter; }
@@ -230,7 +230,7 @@ class Profiler {
     bool isAddressInCode(const void* pc);
 
     void trapHandler(int signo, siginfo_t* siginfo, void* ucontext);
-    static void segvHandler(int signo, siginfo_t* siginfo, void* ucontext);
+    static void crashHandler(int signo, siginfo_t* siginfo, void* ucontext);
     static void wakeupHandler(int signo);
     static void setupSignalHandlers();
 

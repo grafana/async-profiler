@@ -7,16 +7,29 @@
 #define _INSTRUMENT_H
 
 #include <jvmti.h>
+#include <map>
+#include <string>
+#include "arch.h"
 #include "engine.h"
 
+typedef std::string ClassName;
+typedef std::string Method; // name and signature
+typedef long Latency;
+
+typedef std::map<Method, Latency> MethodTargets;
+typedef std::map<ClassName, MethodTargets> Targets;
 
 class Instrument : public Engine {
   private:
-    static char* _target_class;
+    static Targets _targets;
     static bool _instrument_class_loaded;
-    static u64 _interval;
+    static Latency _interval;
     static volatile u64 _calls;
     static volatile bool _running;
+
+    static bool shouldRecordSample() {
+        return _interval <= 1 || ((atomicInc(_calls) + 1) % _interval) == 0;
+    }
 
   public:
     const char* type() {
@@ -35,7 +48,7 @@ class Instrument : public Engine {
     Error start(Arguments& args);
     void stop();
 
-    void setupTargetClassAndMethod(const char* event);
+    Error setupTargetClassAndMethod(const Arguments& args);
 
     void retransformMatchedClasses(jvmtiEnv* jvmti);
 
@@ -45,7 +58,8 @@ class Instrument : public Engine {
                                           jint class_data_len, const u8* class_data,
                                           jint* new_class_data_len, u8** new_class_data);
 
-    static void JNICALL recordSample(JNIEnv* jni, jobject unused);
+    static void JNICALL recordEntry(JNIEnv* jni, jobject unused);
+    static void JNICALL recordExit0(JNIEnv* jni, jobject unused, jlong startTimeNs);
 };
 
 #endif // _INSTRUMENT_H

@@ -7,10 +7,10 @@
 #define _JFRMETADATA_H
 
 #include <string>
-#include <map>
 #include <vector>
 #include <stdio.h>
 #include <string.h>
+#include "index.h"
 
 
 enum JfrType {
@@ -40,7 +40,9 @@ enum JfrType {
     T_SYMBOL = 31,
     T_GC_WHEN = 32,
     T_LOG_LEVEL = 33,
+    T_USER_EVENT_TYPE = 34,
 
+    // types between T_EVENT and T_ANNOTATION inherit from jdk.jfr.Event, see JfrMetadata::type
     T_EVENT = 100,
     T_EXECUTION_SAMPLE = 101,
     T_ALLOC_IN_NEW_TLAB = 102,
@@ -56,13 +58,17 @@ enum JfrType {
     T_INITIAL_SYSTEM_PROPERTY = 112,
     T_NATIVE_LIBRARY = 113,
     T_GC_HEAP_SUMMARY = 114,
-    T_LOG = 115,
-    T_WINDOW = 116,
-    T_LIVE_OBJECT = 117,
-    T_WALL_CLOCK_SAMPLE = 118,
-    T_MALLOC = 119,
-    T_FREE = 120,
+    T_METHOD_TRACE = 115,
+    T_LOG = 116,
+    T_WINDOW = 117,
+    T_LIVE_OBJECT = 118,
+    T_WALL_CLOCK_SAMPLE = 119,
+    T_MALLOC = 120,
+    T_FREE = 121,
+    T_USER_EVENT = 122,
+    T_PROCESS_SAMPLE = 123,
 
+    // types after T_ANNOTATION inherit from java.lang.annotation.Annotation, see JfrMetadata::type
     T_ANNOTATION = 200,
     T_LABEL = 201,
     T_CATEGORY = 202,
@@ -89,17 +95,10 @@ class Attribute {
 
 class Element {
   protected:
-    static std::map<std::string, int> _string_map;
-    static std::vector<std::string> _strings;
+    static Index _strings;
 
     static int getId(const char* s) {
-        std::string str(s);
-        int id = _string_map[str];
-        if (id == 0) {
-            id = _string_map[str] = _string_map.size();
-            _strings.push_back(str);
-        }
-        return id - 1;
+        return _strings.indexOf(s);
     }
 
   public:
@@ -232,7 +231,7 @@ class JfrMetadata : Element {
         return &_root;
     }
 
-    static std::vector<std::string>& strings() {
+    static const Index& strings() {
         return _strings;
     }
 };

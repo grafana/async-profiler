@@ -58,6 +58,8 @@ public class Main {
                 JfrToPprof.convert(input, output, args);
             } else if ("heatmap".equals(args.output)) {
                 JfrToHeatmap.convert(input, output, args);
+            } else if ("otlp".equals(args.output)) {
+                JfrToOtlp.convert(input, output, args);
             } else {
                 throw new IllegalArgumentException("Unrecognized output format: " + args.output);
             }
@@ -93,15 +95,17 @@ public class Main {
         System.out.print("Usage: jfrconv [options] <input> [<input>...] <output>\n" +
                 "\n" +
                 "Conversion options:\n" +
-                "  -o --output FORMAT    Output format: html, collapsed, pprof, pb.gz, heatmap\n" +
+                "  -o --output FORMAT    Output format: html, collapsed, pprof, pb.gz, heatmap, otlp\n" +
                 "\n" +
                 "JFR options:\n" +
-                "     --cpu              CPU profile\n" +
+                "     --cpu              CPU profile (ExecutionSample)\n" +
+                "     --cpu-time         CPU profile (CPUTimeSample)\n" +
                 "     --wall             Wall clock profile\n" +
                 "     --alloc            Allocation profile\n" +
                 "     --live             Live object profile\n" +
                 "     --nativemem        malloc profile\n" +
                 "     --leak             Only include memory leaks in nativemem\n" +
+                "     --tail RATIO       Ignore tail allocations for leak profiling (10% by default)\n" +
                 "     --lock             Lock contention profile\n" +
                 "  -t --threads          Split stack traces by threads\n" +
                 "  -s --state LIST       Filter thread states: runnable, sleeping\n" +

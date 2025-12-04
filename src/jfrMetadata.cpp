@@ -6,8 +6,7 @@
 #include "jfrMetadata.h"
 
 
-std::map<std::string, int> Element::_string_map;
-std::vector<std::string> Element::_strings;
+Index Element::_strings;
 
 JfrMetadata JfrMetadata::_root;
 
@@ -82,6 +81,9 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("when", T_STRING, "When"))
 
             << (type("profiler.types.LogLevel", T_LOG_LEVEL, "Log Level", true)
+                << field("name", T_STRING, "Name"))
+
+            << (type("profiler.types.UserEventType", T_USER_EVENT_TYPE, "User-Defined Event Type", true)
                 << field("name", T_STRING, "Name"))
 
             << (type("jdk.ExecutionSample", T_EXECUTION_SAMPLE, "Method Profiling Sample")
@@ -212,6 +214,14 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("heapSpace", T_VIRTUAL_SPACE, "VirtualSpace")
                 << field("heapUsed", T_LONG, "Heap Used", F_BYTES))
 
+            << (type("jdk.MethodTrace", T_METHOD_TRACE, "Method Trace")
+                << category("Java Virtual Machine", "Method Tracing")
+                << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
+                << field("duration", T_LONG, "Duration", F_DURATION_TICKS)
+                << field("eventThread", T_THREAD, "Event Thread", F_CPOOL)
+                << field("stackTrace", T_STACK_TRACE, "Stack Trace", F_CPOOL)
+                << field("method", T_METHOD, "Method", F_CPOOL))
+
             << (type("profiler.Log", T_LOG, "Log Message")
                 << category("Profiler")
                 << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
@@ -256,6 +266,40 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("stackTrace", T_STACK_TRACE, "Stack Trace", F_CPOOL)
                 << field("address", T_LONG, "Address", F_ADDRESS))
 
+            << (type("profiler.UserEvent", T_USER_EVENT, "User-Defined Event")
+                << category("Profiler")
+                << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
+                << field("eventThread", T_THREAD, "Event Thread", F_CPOOL)
+                << field("type", T_USER_EVENT_TYPE, "User Event Type", F_CPOOL)
+                // Using T_STRING with a Latin-1 string to encode raw bytes as user data.
+                // This is not type-correct, but `jfr print` has a NullPointerException
+                // when encountering a T_BYTE/F_ARRAY.
+                << field("data", T_STRING, "User Data"))
+
+            << (type("profiler.ProcessSample", T_PROCESS_SAMPLE, "Process Stats Sample")
+                << category("Operating System", "Process")
+                << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
+                << field("pid", T_INT, "Process ID", F_UNSIGNED)
+                << field("ppid", T_INT, "Parent Process ID", F_UNSIGNED)
+                << field("name", T_STRING, "Process Name")
+                << field("cmdLine", T_STRING, "Command Line")
+                << field("uid", T_INT, "User ID", F_UNSIGNED)
+                << field("state", T_BYTE, "Process State")
+                << field("processStartTime", T_LONG, "Process Start Time", F_TIME_MILLIS)
+                << field("cpuUser", T_FLOAT, "User CPU Time")
+                << field("cpuSystem", T_FLOAT, "System CPU Time")
+                << field("cpuPercent", T_FLOAT, "CPU Percentage", F_PERCENTAGE)
+                << field("threads", T_INT, "Thread Count", F_UNSIGNED)
+                << field("vmSize", T_LONG, "Virtual Memory Size", F_BYTES)
+                << field("vmRss", T_LONG, "Resident Memory Size", F_BYTES)
+                << field("rssAnon", T_LONG, "Resident anonymous memory", F_BYTES)
+                << field("rssFiles", T_LONG, "Resident file mappings", F_BYTES)
+                << field("rssShmem", T_LONG, "Resident shared Memory", F_BYTES)
+                << field("minorFaults", T_LONG, "Minor Page Faults", F_UNSIGNED)
+                << field("majorFaults", T_LONG, "Major Page Faults", F_UNSIGNED)
+                << field("ioRead", T_LONG, "I/O Read Bytes", F_BYTES)
+                << field("ioWrite", T_LONG, "I/O Write Bytes", F_BYTES))
+
             << (type("jdk.jfr.Label", T_LABEL, NULL)
                 << field("value", T_STRING))
 
@@ -280,7 +324,4 @@ JfrMetadata::JfrMetadata() : Element("root") {
             << type("jdk.jfr.Percentage", T_PERCENTAGE, "Percentage"))
 
         << element("region").attribute("locale", "en_US").attribute("gmtOffset", "0");
-
-    // The map is used only during construction
-    _string_map.clear();
 }

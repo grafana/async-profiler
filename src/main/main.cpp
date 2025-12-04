@@ -31,66 +31,70 @@ static const char VERSION_STRING[] =
 static const char USAGE_STRING[] =
     "Usage: " APP_BINARY " [action] [options] <pid>\n"
     "Actions:\n"
-    "  start             start profiling and return immediately\n"
-    "  resume            resume profiling without resetting collected data\n"
-    "  stop              stop profiling\n"
-    "  dump              dump collected data without stopping profiling session\n"
-    "  check             check if the specified profiling event is available\n"
-    "  status            print profiling status\n"
-    "  meminfo           print profiler memory stats\n"
-    "  list              list profiling events supported by the target JVM\n"
-    "  load              load agent library (jattach action)\n"
-    "  jcmd              run JVM diagnostic command (jattach action)\n"
-    "  collect           collect profile for the specified period of time\n"
-    "                    and then stop (default action)\n"
+    "  start               start profiling and return immediately\n"
+    "  resume              resume profiling without resetting collected data\n"
+    "  stop                stop profiling\n"
+    "  dump                dump collected data without stopping profiling session\n"
+    "  check               check if the specified profiling event is available\n"
+    "  status              print profiling status\n"
+    "  meminfo             print profiler memory stats\n"
+    "  list                list profiling events supported by the target JVM\n"
+    "  load                load agent library (jattach action)\n"
+    "  jcmd                run JVM diagnostic command (jattach action)\n"
+    "  collect             collect profile for the specified period of time\n"
+    "                      and then stop (default action)\n"
     "Options:\n"
-    "  -e event          profiling event: cpu|alloc|nativemem|lock|cache-misses etc.\n"
-    "  -d duration       run profiling for <duration> seconds\n"
-    "  -f filename       dump output to <filename>\n"
-    "  -i interval       sampling interval in nanoseconds\n"
-    "  -j jstackdepth    maximum Java stack depth\n"
-    "  -t, --threads     profile different threads separately\n"
-    "  -s, --simple      simple class names instead of FQN\n"
-    "  -n, --norm        normalize names of hidden classes / lambdas\n"
-    "  -g, --sig         print method signatures\n"
-    "  -a, --ann         annotate Java methods\n"
-    "  -l, --lib         prepend library names\n"
-    "  -o fmt            output format: flat|traces|collapsed|flamegraph|tree|jfr\n"
-    "  -I include        output only stack traces containing the specified pattern\n"
-    "  -X exclude        exclude stack traces with the specified pattern\n"
-    "  -L level          log level: debug|info|warn|error|none\n"
-    "  -F features       advanced stack trace features: vtable, comptask, pcaddr\n"
-    "  -v, --version     display version string\n"
+    "  -e event            profiling event: cpu|alloc|nativemem|lock|cache-misses etc.\n"
+    "  -d duration         run profiling for <duration> seconds\n"
+    "  -f filename         dump output to <filename>\n"
+    "  -i interval         sampling interval in nanoseconds\n"
+    "  -j jstackdepth      maximum Java stack depth\n"
+    "  -t, --threads       profile different threads separately\n"
+    "  -s, --simple        simple class names instead of FQN\n"
+    "  -n, --norm          normalize names of hidden classes / lambdas\n"
+    "  -g, --sig           print method signatures\n"
+    "  -a, --ann           annotate Java methods\n"
+    "  -l, --lib           prepend library names\n"
+    "  -o fmt              output format: flat|traces|collapsed|flamegraph|tree|jfr|otlp\n"
+    "  -I include          output only stack traces containing the specified pattern\n"
+    "  -X exclude          exclude stack traces with the specified pattern\n"
+    "  -L level            log level: debug|info|warn|error|none\n"
+    "  -F features         advanced stack trace features: mixed, vtable, comptask, pcaddr\n"
+    "  -v, --version       display version string\n"
     "\n"
-    "  --title string    FlameGraph title\n"
-    "  --minwidth pct    skip frames smaller than pct%%\n"
-    "  --reverse         generate stack-reversed FlameGraph / Call tree (defaults to icicle graph)\n"
-    "  --inverted        toggles the layout for reversed stacktraces from icicle to flamegraph\n"
-    "                    and for default stacktraces from flamegraph to icicle\n"
+    "  --title string      FlameGraph title\n"
+    "  --minwidth pct      skip frames smaller than pct%%\n"
+    "  --reverse           generate stack-reversed FlameGraph / Call tree (defaults to icicle graph)\n"
+    "  --inverted          toggles the layout for reversed stacktraces from icicle to flamegraph\n"
+    "                      and for default stacktraces from flamegraph to icicle\n"
     "\n"
-    "  --loop time       run profiler in a loop\n"
-    "  --alloc bytes     allocation profiling interval in bytes\n"
-    "  --live            build allocation profile from live objects only\n"
-    "  --nativemem bytes native allocation profiling interval in bytes\n"
-    "  --nofree          do not collect free calls in native allocation profiling\n"
-    "  --lock duration   lock profiling threshold in nanoseconds\n"
-    "  --wall interval   wall clock profiling interval\n"
-    "  --total           accumulate the total value (time, bytes, etc.)\n"
-    "  --all-user        only include user-mode events\n"
-    "  --sched           group threads by scheduling policy\n"
-    "  --cstack mode     how to traverse C stack: fp|dwarf|lbr|vm|no\n"
-    "  --signal num      use alternative signal for cpu or wall clock profiling\n"
-    "  --clock source    clock source for JFR timestamps: tsc|monotonic\n"
-    "  --begin function  begin profiling when function is executed\n"
-    "  --end function    end profiling when function is executed\n"
-    "  --ttsp            only time-to-safepoint profiling \n"
-    "  --nostop          do not stop profiling outside --begin/--end window\n"
-    "  --jfropts opts    JFR recording options: mem\n"
-    "  --jfrsync config  synchronize profiler with JFR recording\n"
-    "  --libpath path    full path to libasyncProfiler.so in the container\n"
-    "  --fdtransfer      use fdtransfer to serve perf requests\n"
-    "  --target-cpu cpu  sample threads on a specific CPU (perf_events only, default: -1)\n"
-    "                    from the non-privileged target\n"
+    "  --loop time         run profiler in a loop\n"
+    "  --alloc bytes       allocation profiling interval in bytes\n"
+    "  --live              build allocation profile from live objects only\n"
+    "  --nativemem bytes   native allocation profiling interval in bytes\n"
+    "  --nofree            do not collect free calls in native allocation profiling\n"
+    "  --trace method      Method to be instrumented with optional latency threshold\n"
+    "  --lock duration     lock profiling threshold in nanoseconds\n"
+    "  --wall interval     wall clock profiling interval\n"
+    "  --proc interval     process sampling interval (default: 30s)\n"
+    "  --all               shorthand for enabling cpu, wall, alloc, live,\n"
+    "                      nativemem and lock profiling simultaneously\n"
+    "  --total             accumulate the total value (time, bytes, etc.)\n"
+    "  --all-user          only include user-mode events\n"
+    "  --sched             group threads by scheduling policy\n"
+    "  --cstack mode       how to traverse C stack: fp|dwarf|lbr|vm|no\n"
+    "  --signal num        use alternative signal for cpu or wall clock profiling\n"
+    "  --clock source      clock source for JFR timestamps: tsc|monotonic\n"
+    "  --begin function    begin profiling when function is executed\n"
+    "  --end function      end profiling when function is executed\n"
+    "  --ttsp              only time-to-safepoint profiling \n"
+    "  --nostop            do not stop profiling outside --begin/--end window\n"
+    "  --jfropts opts      JFR recording options: mem\n"
+    "  --jfrsync config    synchronize profiler with JFR recording\n"
+    "  --libpath path      full path to libasyncProfiler.so in the container\n"
+    "  --fdtransfer        run separate fdtransfer process to serve perf requests\n"
+    "                      from the non-privileged target\n"
+    "  --target-cpu cpu    sample threads on a specific CPU (perf_events only, default: -1)\n"
     "\n"
     "<pid> is a numeric process ID of the target JVM\n"
     "      or 'jps' keyword to find running JVM automatically\n"
@@ -99,7 +103,8 @@ static const char USAGE_STRING[] =
     "Example: " APP_BINARY " -d 30 -f profile.html 3456\n"
     "         " APP_BINARY " start -i 1ms jps\n"
     "         " APP_BINARY " stop -o flat jps\n"
-    "         " APP_BINARY " -d 5 -e alloc MyAppName\n";
+    "         " APP_BINARY " -d 5 -e alloc MyAppName\n"
+    "         " APP_BINARY " --all -f profile.jfr MyAppName\n";
 
 
 extern "C" int jattach(int pid, int argc, const char** argv, int print_output);
@@ -157,6 +162,8 @@ class String {
     }
 
     String& operator=(const String& other) {
+        if (this == &other) return *this;
+
         free(_str);
         _str = strdup(other._str);
         return *this;
@@ -493,20 +500,24 @@ int main(int argc, const char** argv) {
         } else if (arg == "--width" || arg == "--height" || arg == "--minwidth") {
             format << "," << (arg.str() + 2) << "=" << args.next();
 
-        } else if (arg == "--reverse" || arg == "--inverted" || arg == "--samples" || arg == "--total" || arg == "--sched" || arg == "--live" || arg == "--nofree") {
+        } else if (arg == "--reverse" || arg == "--inverted" || arg == "--samples" || arg == "--total" ||
+                   arg == "--sched" || arg == "--live" || arg == "--nofree" || arg == "--record-cpu") {
             format << "," << (arg.str() + 2);
 
         } else if (arg == "--alloc" || arg == "--nativemem" || arg == "--lock" || arg == "--wall" ||
-                   arg == "--chunksize" || arg == "--chunktime" ||
+                   arg == "--trace" || arg == "--chunksize" || arg == "--chunktime" ||
                    arg == "--cstack" || arg == "--signal" || arg == "--clock" || arg == "--begin" || arg == "--end" ||
-                   arg == "--target-cpu") {
+                   arg == "--target-cpu" || arg == "--proc") {
             params << "," << (arg.str() + 2) << "=" << args.next();
 
         } else if (arg == "--ttsp") {
-            params << ",begin=SafepointSynchronize::begin,end=RuntimeService::record_safepoint_synchronized";
+            params << ",ttsp";
 
         } else if (arg == "--nostop") {
             params << ",nostop";
+
+        } else if (arg == "--all") {
+            params << ",all";
 
         } else if (arg == "--all-user") {
             params << ",alluser";
@@ -514,8 +525,8 @@ int main(int argc, const char** argv) {
         } else if (arg == "--safe-mode") {
             params << ",safemode=" << args.next();
 
-        } else if (arg == "--jfrsync") {
-            params << ",jfrsync=" << args.next();
+        } else if (arg == "--jfrsync" || arg == "--jfropts") {
+            params << "," << (arg.str() + 2) << "=" << args.next();
             output = "jfr";
 
         } else if (arg == "--timeout" || arg == "--loop") {

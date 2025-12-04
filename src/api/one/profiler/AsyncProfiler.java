@@ -42,7 +42,7 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
                 File file = extractEmbeddedLib();
                 if (file != null) {
                     try {
-                        System.load(file.getPath());
+                        System.load(file.getAbsolutePath());
                     } finally {
                         file.delete();
                     }
@@ -232,6 +232,22 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     }
 
     /**
+     * Dump collected data in OTLP format.
+     * <p>
+     * This API is UNSTABLE and might change or be removed in the next version of async-profiler.
+     *
+     * @return OTLP representation of the profile
+     */
+    @Override
+    public byte[] dumpOtlp() {
+        try {
+            return execute1("otlp");
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
      * Add the given thread to the set of profiled threads.
      * 'filter' option must be enabled to use this method.
      *
@@ -292,6 +308,8 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     private native void stop0() throws IllegalStateException;
 
     private native String execute0(String command) throws IllegalArgumentException, IllegalStateException, IOException;
+
+    private native byte[] execute1(String command) throws IllegalArgumentException, IllegalStateException, IOException;
 
     private native void filterThread0(Thread thread, boolean enable);
     private native void setContextId0(long contextId);

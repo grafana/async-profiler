@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include "arguments.h"
+#include "os.h"
 
 
 // Arguments of the last start/resume command; reused for shutdown and restart
@@ -21,12 +22,6 @@ const Error Error::OK(NULL);
 
 // Extra buffer space for expanding file pattern
 const size_t EXTRA_BUF_SIZE = 512;
-
-static const Multiplier NANOS[] = {{'n', 1}, {'u', 1000}, {'m', 1000000}, {'s', 1000000000}, {0, 0}};
-static const Multiplier BYTES[] = {{'b', 1}, {'k', 1024}, {'m', 1048576}, {'g', 1073741824}, {0, 0}};
-static const Multiplier SECONDS[] = {{'s', 1}, {'m', 60}, {'h', 3600}, {'d', 86400}, {0, 0}};
-static const Multiplier UNIVERSAL[] = {{'n', 1}, {'u', 1000}, {'m', 1000000}, {'s', 1000000000}, {'b', 1}, {'k', 1024}, {'g', 1073741824}, {0, 0}};
-
 
 // Statically compute hash code of a string containing up to 12 [a-z] letters
 #define HASH(s)  ((s[0] & 31LL)       | (s[1] & 31LL) <<  5 | (s[2]  & 31LL) << 10 | (s[3]  & 31LL) << 15 | \
@@ -45,71 +40,78 @@ static const Multiplier UNIVERSAL[] = {{'n', 1}, {'u', 1000}, {'m', 1000000}, {'
 // The format of the string is:
 //     arg[,arg...]
 // where arg is one of the following options:
-//     start            - start profiling
-//     resume           - start or resume profiling without resetting collected data
-//     stop             - stop profiling
-//     dump             - dump collected data without stopping profiling session
-//     check            - check if the specified profiling event is available
-//     status           - print profiling status (inactive / running for X seconds)
-//     meminfo          - print profiler memory stats
-//     list             - show the list of available profiling events
-//     version          - display the agent version
-//     event=EVENT      - which event to trace (cpu, wall, cache-misses, etc.)
-//     alloc[=BYTES]    - profile allocations with BYTES interval
-//     live             - build allocation profile from live objects only
-//     lock[=DURATION]  - profile contended locks overflowing the DURATION ns bucket (default: 10us)
-//     wall[=NS]        - run wall clock profiling together with CPU profiling
-//     nobatch          - legacy wall clock sampling without batch events
-//     collapsed        - dump collapsed stacks (the format used by FlameGraph script)
-//     flamegraph       - produce Flame Graph in HTML format
-//     tree             - produce call tree in HTML format
-//     jfr              - dump events in Java Flight Recorder format
-//     jfropts=OPTIONS  - JFR recording options: numeric bitmask or 'mem'
-//     jfrsync[=CONFIG] - start Java Flight Recording with the given config along with the profiler
-//     traces[=N]       - dump top N call traces
-//     flat[=N]         - dump top N methods (aka flat profile)
-//     samples          - count the number of samples (default)
-//     total            - count the total value (time, bytes, etc.) instead of samples
-//     chunksize=N      - approximate size of JFR chunk in bytes (default: 100 MB)
-//     chunktime=N      - duration of JFR chunk in seconds (default: 1 hour)
-//     timeout=TIME     - automatically stop profiler at TIME (absolute or relative)
-//     loop=TIME        - run profiler in a loop (continuous profiling)
-//     interval=N       - sampling interval in ns (default: 10'000'000, i.e. 10 ms)
-//     jstackdepth=N    - maximum Java stack depth (default: 2048)
-//     signal=N         - use alternative signal for cpu or wall clock profiling
-//     features=LIST    - advanced stack trace features (vtable, comptask, pcaddr)"
-//     safemode=BITS    - disable stack recovery techniques (default: 0, i.e. everything enabled)
-//     file=FILENAME    - output file name for dumping
-//     log=FILENAME     - log warnings and errors to the given dedicated stream
-//     loglevel=LEVEL   - logging level: TRACE, DEBUG, INFO, WARN, ERROR, or NONE
-//     quiet            - do not log "Profiling started/stopped" message
-//     server=ADDRESS   - start insecure HTTP server at ADDRESS/PORT
-//     filter=FILTER    - thread filter
-//     threads          - profile different threads separately
-//     sched            - group threads by scheduling policy
-//     cstack=MODE      - how to collect C stack frames in addition to Java stack
-//                        MODE is 'fp', 'dwarf', 'lbr', 'vm' or 'no'
-//     clock=SOURCE     - clock source for JFR timestamps: 'tsc' or 'monotonic'
-//     alluser          - include only user-mode events
-//     fdtransfer       - use fdtransfer to pass fds to the profiler
-//     target-cpu=CPU   - sample threads on a specific CPU (perf_events only, default: -1)
-//     simple           - simple class names instead of FQN
-//     dot              - dotted class names
-//     norm             - normalize names of hidden classes / lambdas
-//     sig              - print method signatures
-//     ann              - annotate Java methods
-//     lib              - prepend library names
-//     mcache           - max age of jmethodID cache (default: 0 = disabled)
-//     include=PATTERN  - include stack traces containing PATTERN
-//     exclude=PATTERN  - exclude stack traces containing PATTERN
-//     begin=FUNCTION   - begin profiling when FUNCTION is executed
-//     end=FUNCTION     - end profiling when FUNCTION is executed
-//     nostop           - do not stop profiling outside --begin/--end window
-//     title=TITLE      - FlameGraph title
-//     minwidth=PCT     - FlameGraph minimum frame width in percent
-//     reverse          - generate stack-reversed FlameGraph / Call tree (defaults to icicle graph)
-//     inverted         - toggles the layout for reversed stacktraces from icicle to flamegraph
-//                        and for default stacktraces from flamegraph to icicle
+//     start                   - start profiling
+//     resume                  - start or resume profiling without resetting collected data
+//     stop                    - stop profiling
+//     dump                    - dump collected data without stopping profiling session
+//     check                   - check if the specified profiling event is available
+//     status                  - print profiling status (inactive / running for X seconds)
+//     meminfo                 - print profiler memory stats
+//     list                    - show the list of available profiling events
+//     version                 - display the agent version
+//     event=EVENT             - which event to trace (cpu, wall, cache-misses, etc.)
+//     alloc[=BYTES]           - profile allocations with BYTES interval
+//     live                    - build allocation profile from live objects only
+//     nativemem[=BYTES]       - profile native allocations with BYTES interval
+//     nofree                  - do not collect free calls in native allocation profiling
+//     trace=METHOD[:DURATION] - method to be traced with optional latency threshold
+//     lock[=DURATION]         - profile contended locks overflowing the DURATION ns bucket (default: 10us)
+//     wall[=NS]               - run wall clock profiling together with CPU profiling
+//     nobatch                 - legacy wall clock sampling without batch events
+//     proc[=S]                - collect process stats (default: 30s)
+//     collapsed               - dump collapsed stacks (the format used by FlameGraph script)
+//     flamegraph              - produce Flame Graph in HTML format
+//     tree                    - produce call tree in HTML format
+//     jfr                     - dump events in Java Flight Recorder format
+//     jfropts=OPTIONS         - JFR recording options: numeric bitmask or 'mem'
+//     jfrsync[=CONFIG]        - start Java Flight Recording with the given config along with the profiler
+//     traces[=N]              - dump top N call traces
+//     flat[=N]                - dump top N methods (aka flat profile)
+//     otlp                    - dump in OpenTelemetry format
+//     samples                 - count the number of samples (default)
+//     total                   - count the total value (time, bytes, etc.) instead of samples
+//     chunksize=N             - approximate size of JFR chunk in bytes (default: 100 MB)
+//     chunktime=N             - duration of JFR chunk in seconds (default: 1 hour)
+//     timeout=TIME            - automatically stop profiler at TIME (absolute or relative)
+//     loop=TIME               - run profiler in a loop (continuous profiling)
+//     interval=N              - sampling interval in ns (default: 10'000'000, i.e. 10 ms)
+//     jstackdepth=N           - maximum Java stack depth (default: 2048)
+//     signal=N                - use alternative signal for cpu or wall clock profiling
+//     features=LIST           - advanced stack trace features (mixed, vtable, comptask, pcaddr)"
+//     safemode=BITS           - disable stack recovery techniques (default: 0, i.e. everything enabled)
+//     file=FILENAME           - output file name for dumping
+//     log=FILENAME            - log warnings and errors to the given dedicated stream
+//     loglevel=LEVEL          - logging level: TRACE, DEBUG, INFO, WARN, ERROR, or NONE
+//     quiet                   - do not log "Profiling started/stopped" message
+//     server=ADDRESS          - start insecure HTTP server at ADDRESS/PORT
+//     filter=FILTER           - thread filter
+//     threads                 - profile different threads separately
+//     sched                   - group threads by scheduling policy
+//     cstack=MODE             - how to collect C stack frames in addition to Java stack
+//                               MODE is 'fp', 'dwarf', 'lbr', 'vm' or 'no'
+//     clock=SOURCE            - clock source for JFR timestamps: 'tsc' or 'monotonic'
+//     alluser                 - include only user-mode events
+//     fdtransfer              - use fdtransfer to pass fds to the profiler
+//     target-cpu=CPU          - sample threads on a specific CPU (perf_events only, default: -1)
+//     record-cpu              - record which cpu a sample was taken on
+//     simple                  - simple class names instead of FQN
+//     dot                     - dotted class names
+//     norm                    - normalize names of hidden classes / lambdas
+//     sig                     - print method signatures
+//     ann                     - annotate Java methods
+//     lib                     - prepend library names
+//     mcache                  - max age of jmethodID cache (default: 0 = disabled)
+//     include=PATTERN         - include stack traces containing PATTERN
+//     exclude=PATTERN         - exclude stack traces containing PATTERN
+//     begin=FUNCTION          - begin profiling when FUNCTION is executed
+//     end=FUNCTION            - end profiling when FUNCTION is executed
+//     nostop                  - do not stop profiling outside --begin/--end window
+//     ttsp                    - only time-to-safepoint profiling
+//     title=TITLE             - FlameGraph title
+//     minwidth=PCT            - FlameGraph minimum frame width in percent
+//     reverse                 - generate stack-reversed FlameGraph / Call tree (defaults to icicle graph)
+//     inverted                - toggles the layout for reversed stacktraces from icicle to flamegraph
+//                               and for default stacktraces from flamegraph to icicle
 //
 // It is possible to specify multiple dump options at the same time
 
@@ -197,6 +199,9 @@ Error Arguments::parse(const char* args) {
                 _output = OUTPUT_TEXT;
                 _dump_flat = value == NULL ? INT_MAX : atoi(value);
 
+            CASE("otlp")
+                _output = OUTPUT_OTLP;
+
             CASE("samples")
                 _counter = COUNTER_SAMPLES;
 
@@ -223,7 +228,7 @@ Error Arguments::parse(const char* args) {
                     if (_nativemem < 0) _nativemem = 0;
                 } else if (strcmp(value, EVENT_LOCK) == 0) {
                     if (_lock < 0) _lock = DEFAULT_LOCK_INTERVAL;
-                } else if (_event != NULL) {
+                } else if (_event != NULL && !_all) {
                     msg = "Duplicate event argument";
                 } else {
                     _event = value;
@@ -249,16 +254,46 @@ Error Arguments::parse(const char* args) {
             CASE("nofree")
                 _nofree = true;
 
+            CASE("trace")
+                _trace.push_back(value);
+
             CASE("lock")
-                _lock = value == NULL ? 0 : parseUnits(value, NANOS);
+                _lock = value == NULL ? DEFAULT_LOCK_INTERVAL : parseUnits(value, NANOS);
 
             CASE("wall")
                 _wall = value == NULL ? 0 : parseUnits(value, NANOS);
+
+            CASE("proc")
+                _proc = value == NULL ? DEFAULT_PROC_INTERVAL : parseUnits(value, SECONDS);
 
             CASE("cpu")
                 if (_event != NULL) {
                     msg = "Duplicate event argument";
                 } else {
+                    _event = EVENT_CPU;
+                }
+
+            CASE("all")
+                _all = true;
+                _live = true;
+                if (_wall < 0) {
+                    _wall = 0;
+                }
+                if (_alloc < 0) {
+                    _alloc = 0;
+                }
+                if (_lock < 0) {
+                    _lock = DEFAULT_LOCK_INTERVAL;
+                }
+                if (_nativemem < 0) {
+                    _nativemem = DEFAULT_ALLOC_INTERVAL;
+                }
+
+                if (_proc < 0 && OS::isLinux()) {
+                    _proc = DEFAULT_PROC_INTERVAL;
+                }
+
+                if (_event == NULL && OS::isLinux()) {
                     _event = EVENT_CPU;
                 }
 
@@ -283,7 +318,9 @@ Error Arguments::parse(const char* args) {
             CASE("features")
                 if (value != NULL) {
                     if (strstr(value, "stats"))    _features.stats = 1;
+                    if (strstr(value, "jnienv"))   _features.jnienv = 1;
                     if (strstr(value, "probesp"))  _features.probe_sp = 1;
+                    if (strstr(value, "mixed"))    _features.mixed = 1;
                     if (strstr(value, "vtable"))   _features.vtable_target = 1;
                     if (strstr(value, "comptask")) _features.comp_task = 1;
                     if (strstr(value, "pcaddr"))   _features.pc_addr = 1;
@@ -336,18 +373,19 @@ Error Arguments::parse(const char* args) {
                 _filter = value == NULL ? "" : value;
 
             CASE("include")
-                // Workaround -Wstringop-overflow warning
-                if (value == arg + 8) appendToEmbeddedList(_include, arg + 8);
+                _include.push_back(value);
 
             CASE("exclude")
-                // Workaround -Wstringop-overflow warning
-                if (value == arg + 8) appendToEmbeddedList(_exclude, arg + 8);
+                _exclude.push_back(value);
 
             CASE("threads")
                 _threads = true;
 
             CASE("sched")
                 _sched = true;
+
+            CASE("record-cpu")
+                _record_cpu = true;
 
             CASE("live")
                 _live = true;
@@ -369,7 +407,9 @@ Error Arguments::parse(const char* args) {
                     } else if (strcmp(value, "vm") == 0) {
                         _cstack = CSTACK_VM;
                     } else if (strcmp(value, "vmx") == 0) {
-                        _cstack = CSTACK_VMX;
+                        // cstack=vmx is a shorthand for cstack=vm,features=mixed
+                        _cstack = CSTACK_VM;
+                        _features.mixed = 1;
                     } else {
                         _cstack = CSTACK_NO;
                     }
@@ -420,6 +460,13 @@ Error Arguments::parse(const char* args) {
             CASE("nostop")
                 _nostop = true;
 
+            CASE("ttsp")
+                if (_begin != NULL || _end != NULL) {
+                    msg = "begin and end must both be empty when ttsp is set";
+                }
+                _begin = "SafepointSynchronize::begin";
+                _end = "RuntimeService::record_safepoint_synchronized";
+
             // FlameGraph options
             CASE("title")
                 _title = value;
@@ -443,7 +490,7 @@ Error Arguments::parse(const char* args) {
         return Error(msg);
     }
 
-    if (_event == NULL && _alloc < 0 && _lock < 0 && _wall < 0 && _nativemem < 0) {
+    if (_event == NULL && _alloc < 0 && _lock < 0 && _wall < 0 && _nativemem < 0 && _trace.empty()) {
         _event = EVENT_CPU;
     }
 
@@ -473,12 +520,6 @@ const char* Arguments::file() {
 // Returns true if the log file is a temporary file of asprof launcher
 bool Arguments::hasTemporaryLog() const {
     return _log != NULL && strncmp(_log, "/tmp/asprof-log.", 16) == 0;
-}
-
-// The linked list of string offsets is embedded right into _buf array
-void Arguments::appendToEmbeddedList(int& list, char* value) {
-    ((int*)value)[-1] = list;
-    list = (int)(value - _buf);
 }
 
 // Should match statically computed HASH(arg)

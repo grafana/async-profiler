@@ -4,6 +4,7 @@
  */
 
 #include <algorithm>
+#include <assert.h>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -12,6 +13,8 @@
 #include <string.h>
 #include <pthread.h>
 #include <sys/param.h>
+#include <time.h>
+#include "index.h"
 #include "profiler.h"
 #include "perfEvents.h"
 #include "ctimer.h"
@@ -30,6 +33,7 @@
 #include "fdtransferClient.h"
 #include "frameName.h"
 #include "os.h"
+#include "otlp.h"
 #include "safeAccess.h"
 #include "stackFrame.h"
 #include "stackWalker.h"
@@ -44,7 +48,10 @@ void __attribute__((constructor)) createContextId();
 Profiler* const Profiler::_instance = new Profiler();
 
 static SigAction orig_trapHandler = NULL;
-static SigAction orig_segvHandler = NULL;
+static SigAction orig_crashHandler = NULL;
+
+static uintptr_t profiler_lib_start = 0;
+static uintptr_t profiler_lib_end = 0;
 
 static Engine noop_engine;
 static PerfEvents perf_events;
@@ -69,16 +76,6 @@ void createContextId() {
     pthread_key_create(&local_span_id_key, NULL);
     pthread_key_create(&local_span_name_key, NULL);
 }
-
-// The same constants are used in JfrSync
-enum EventMask {
-    EM_CPU   = 1,
-    EM_ALLOC = 2,
-    EM_LOCK  = 4,
-    EM_WALL  = 8,
-    EM_NATIVEMEM = 16,
-};
-
 
 struct MethodSample {
     u64 samples;
@@ -124,19 +121,6 @@ static inline int makeFrame(ASGCT_CallFrame* frames, jint type, uintptr_t id) {
 
 static inline int makeFrame(ASGCT_CallFrame* frames, jint type, const char* id) {
     return makeFrame(frames, type, (jmethodID)id);
-}
-
-
-// Avoid syscall when possible
-static inline int fastThreadId() {
-    VMThread* vm_thread;
-    if (VMStructs::hasNativeThreadId() && (vm_thread = VMThread::current()) != NULL) {
-        int thread_id = vm_thread->osThreadId();
-        if (thread_id > 0) {
-            return thread_id;
-        }
-    }
-    return OS::threadId();
 }
 
 
@@ -343,7 +327,7 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
     // Use PerfEvents stack walker for execution samples, or basic stack walker for other events
     if (event_type == PERF_SAMPLE) {
         native_frames = PerfEvents::walk(tid, ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
-    } else if (_cstack >= CSTACK_VM) {
+    } else if (_cstack == CSTACK_VM) {
         return 0;
     } else if (_cstack == CSTACK_DWARF) {
         native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
@@ -406,7 +390,12 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
         return 0;
     }
 
-    JNIEnv* jni = VM::jni();
+    JNIEnv* jni = vm_thread->jni();
+    if (_features.jnienv) {
+        // jnienv feature is only used in tests to validate JNIEnv discovery through VMStructs.
+        // Normally, we avoid calling VM::jni() inside a signal handler as it may deadlock.
+        assert(jni == VM::jni());
+    }
     if (jni == NULL) {
         // Not a Java thread
         return 0;
@@ -625,7 +614,7 @@ void Profiler::fillFrameTypes(ASGCT_CallFrame* frames, int num_frames, NMethod* 
 u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Event* event) {
     atomicInc(_total_samples);
 
-    int tid = fastThreadId();
+    int tid = OS::threadId();
     u32 lock_index = getLockIndex(tid);
     if (!_locks[lock_index].tryLock() &&
         !_locks[lock_index = (lock_index + 1) % CONCURRENCY_LEVEL].tryLock() &&
@@ -666,12 +655,11 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         }
     }
 
-    if (_cstack == CSTACK_VMX) {
-        num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT);
-    } else if (event_type <= WALL_CLOCK_SAMPLE) {
-        // Async events
+    if (_features.mixed) {
+        num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, _features, event_type);
+    } else if (event_type <= MALLOC_SAMPLE) {
         if (_cstack == CSTACK_VM) {
-            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL);
+            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, _features, event_type);
         } else {
             int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
             if (java_frames > 0 && java_ctx.pc != NULL && VMStructs::hasMethodStructs()) {
@@ -685,16 +673,14 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     } else if (event_type >= ALLOC_SAMPLE && event_type <= ALLOC_OUTSIDE_TLAB && _alloc_engine == &alloc_tracer) {
         VMThread* vm_thread;
         if (VMStructs::hasStackStructs() && (vm_thread = VMThread::current()) != NULL) {
-            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor());
+            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor(), event_type);
         } else {
             num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
         }
-    } else if (event_type == MALLOC_SAMPLE) {
-        num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
     } else {
         // Lock events and instrumentation events can safely call synchronous JVM TI stack walker.
         // Skip Instrument.recordSample() method
-        int start_depth = event_type == INSTRUMENTED_METHOD ? 1 : 0;
+        int start_depth = event_type == INSTRUMENTED_METHOD ? 1 : event_type == METHOD_TRACE ? 2 : 0;
         num_frames += getJavaTraceJvmti(jvmti_frames + num_frames, frames + num_frames, start_depth, _max_stack_depth);
     }
 
@@ -707,6 +693,9 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     }
     if (_add_sched_frame) {
         num_frames += makeFrame(frames + num_frames, BCI_ERROR, OS::schedPolicy(0));
+    }
+    if (_add_cpu_frame) {
+        num_frames += makeFrame(frames + num_frames, BCI_CPU, java_ctx.cpu | 0x8000);
     }
 
     if (stack_walk_begin != 0) {
@@ -769,7 +758,7 @@ void Profiler::recordEventOnly(EventType event_type, Event* event) {
         return;
     }
 
-    int tid = fastThreadId();
+    int tid = OS::threadId();
     u32 lock_index = getLockIndex(tid);
     if (!_locks[lock_index].tryLock() &&
         !_locks[lock_index = (lock_index + 1) % CONCURRENCY_LEVEL].tryLock() &&
@@ -827,6 +816,11 @@ Error Profiler::installTraps(const char* begin, const char* end, bool nostop) {
         return Error("End address not found");
     }
 
+    // Having 'begin' and 'end' traps at the same address would result in an infinite loop
+    if (begin_addr && begin_addr == end_addr) {
+        return Error("begin and end symbols should not resolve to the same address");
+    }
+
     _begin_trap.assign(begin_addr);
     _end_trap.assign(end_addr);
     _nostop = nostop;
@@ -870,27 +864,17 @@ void Profiler::trapHandler(int signo, siginfo_t* siginfo, void* ucontext) {
     }
 }
 
-void Profiler::segvHandler(int signo, siginfo_t* siginfo, void* ucontext) {
+void Profiler::crashHandler(int signo, siginfo_t* siginfo, void* ucontext) {
     StackFrame frame(ucontext);
+
+    if (SafeAccess::checkFault(frame)) {
+        return;
+    }
+
     uintptr_t pc = frame.pc();
-
-    uintptr_t length = SafeAccess::skipLoad(pc);
-    if (length > 0) {
-        // Skip the fault instruction, as if it successfully loaded NULL
-        frame.pc() += length;
-        frame.retval() = 0;
-        return;
+    if (pc >= profiler_lib_start && pc < profiler_lib_end) {
+        StackWalker::checkFault();
     }
-
-    length = SafeAccess::skipLoadArg(pc);
-    if (length > 0) {
-        // Act as if the load returned default_value argument
-        frame.pc() += length;
-        frame.retval() = frame.arg1();
-        return;
-    }
-
-    StackWalker::checkFault();
 
     // Workaround for JDK-8313796. Setting cstack=dwarf also helps
     if (VMStructs::isInterpretedFrameValidFunc((const void*)pc) && frame.skipFaultInstruction()) {
@@ -901,7 +885,7 @@ void Profiler::segvHandler(int signo, siginfo_t* siginfo, void* ucontext) {
         return;
     }
 
-    orig_segvHandler(signo, siginfo, ucontext);
+    orig_crashHandler(signo, siginfo, ucontext);
 }
 
 void Profiler::wakeupHandler(int signo) {
@@ -917,9 +901,16 @@ void Profiler::setupSignalHandlers() {
         orig_trapHandler = prev_handler;
     }
 
-    if (VM::hotspot_version() > 0 || !VM::loaded()) {
-        // HotSpot tolerates interposed SIGSEGV/SIGBUS handler; other JVMs probably not
-        orig_segvHandler = OS::replaceCrashHandler(segvHandler);
+    // HotSpot tolerates interposed SIGSEGV/SIGBUS handler; other JVMs don't
+    if (!VM::isOpenJ9() && !VM::isZing()) {
+        CodeCache* profiler_lib = instance()->findLibraryByAddress((void*)crashHandler);
+        if (profiler_lib != NULL) {
+            // Record boundaries of our own library for the signal handler to check
+            // if a crash has happened in the profiler code
+            profiler_lib_start = (uintptr_t)profiler_lib->minAddress();
+            profiler_lib_end = (uintptr_t)profiler_lib->maxAddress();
+        }
+        orig_crashHandler = OS::replaceCrashHandler(crashHandler);
     }
 
     OS::installSignalHandler(WAKEUP_SIGNAL, NULL, wakeupHandler);
@@ -983,24 +974,24 @@ void Profiler::updateNativeThreadNames() {
 }
 
 bool Profiler::excludeTrace(FrameName* fn, CallTrace* trace) {
-    bool checkInclude = fn->hasIncludeList();
-    bool checkExclude = fn->hasExcludeList();
-    if (!(checkInclude || checkExclude)) {
+    bool check_include = fn->hasIncludeList();
+    bool check_exclude = fn->hasExcludeList();
+    if (!(check_include || check_exclude)) {
         return false;
     }
 
     for (int i = 0; i < trace->num_frames; i++) {
         const char* frame_name = fn->name(trace->frames[i], true);
-        if (checkExclude && fn->exclude(frame_name)) {
+        if (check_exclude && fn->exclude(frame_name)) {
             return true;
         }
-        if (checkInclude && fn->include(frame_name)) {
-            checkInclude = false;
-            if (!checkExclude) break;
+        if (check_include && fn->include(frame_name)) {
+            check_include = false;
+            if (!check_exclude) break;
         }
     }
 
-    return checkInclude;
+    return check_include;
 }
 
 Engine* Profiler::selectEngine(const char* event_name) {
@@ -1051,6 +1042,8 @@ Engine* Profiler::activeEngine() {
             return &wall_clock;
         case EM_NATIVEMEM:
             return &malloc_tracer;
+        case EM_METHOD_TRACE:
+            return &instrument;
         default:
             return _engine;
     }
@@ -1087,28 +1080,37 @@ Error Profiler::start(Arguments& args, bool reset) {
         return Error("Profiler already started");
     }
 
+    // If profiler is started from a native app, try to detect a running JVM and attach to it
+    if (!VM::loaded()) {
+        VM::tryAttach();
+    }
+
     Error error = checkJvmCapabilities();
     if (error) {
         return error;
     }
 
-    _event_mask = (args._event != NULL ? EM_CPU : 0) |
-                  (args._alloc >= 0 ? EM_ALLOC : 0) |
-                  (args._lock >= 0 ? EM_LOCK : 0) |
-                  (args._wall >= 0 ? EM_WALL : 0) |
-                  (args._nativemem >= 0 ? EM_NATIVEMEM : 0);
+    _event_mask = args.eventMask();
 
     if (_event_mask == 0) {
         return Error("No profiling events specified");
     } else if ((_event_mask & (_event_mask - 1)) && args._output != OUTPUT_JFR) {
         return Error("Only JFR output supports multiple events");
-    } else if (!VM::loaded() && (_event_mask & (EM_ALLOC | EM_LOCK))) {
+    } else if (!VM::loaded() && (_event_mask & (EM_ALLOC | EM_LOCK | EM_METHOD_TRACE))) {
         return Error("Profiling event is not supported with non-Java processes");
     }
 
     if (args._fdtransfer) {
         if (!FdTransferClient::connectToServer(args._fdtransfer_path)) {
             return Error("Failed to initialize FdTransferClient");
+        }
+    }
+
+    if (args._proc > 0) {
+        if (!OS::isLinux()) {
+            return Error("Process sampling is not supported on the platform");
+        } else if (args._output != OUTPUT_JFR) {
+            return Error("Process sampling requires JFR output format");
         }
     }
 
@@ -1130,6 +1132,7 @@ Error Profiler::start(Arguments& args, bool reset) {
         _add_event_frame = args._output != OUTPUT_JFR;
         _add_thread_frame = args._threads && args._output != OUTPUT_JFR;
         _add_sched_frame = args._sched;
+        _add_cpu_frame = args._record_cpu;
         unlockAll();
 
         // Reset thread names and IDs
@@ -1173,6 +1176,10 @@ Error Profiler::start(Arguments& args, bool reset) {
         return Error("Cannot start wall clock with the selected event");
     } else if (_engine != &perf_events && args._target_cpu != -1) {
         return Error("target-cpu is only supported with perf_events");
+    } else if (_engine != &perf_events && args._record_cpu) {
+        return Error("record-cpu is only supported with perf_events");
+    } else if (_engine == &instrument && !args._trace.empty()) {
+        return Error("Running method tracing and Java method sampling in parallel is not supported");
     }
 
     _cstack = args._cstack;
@@ -1180,13 +1187,18 @@ Error Profiler::start(Arguments& args, bool reset) {
         return Error("DWARF unwinding is not supported on this platform");
     } else if (_cstack == CSTACK_LBR && _engine != &perf_events) {
         return Error("Branch stack is supported only with PMU events");
-    } else if (_cstack >= CSTACK_VM && !VMStructs::hasStackStructs()) {
+    } else if (_cstack == CSTACK_VM && VM::loaded() && !VMStructs::hasStackStructs()) {
         return Error("VMStructs stack walking is not supported on this JVM/platform");
     }
 
-    if (VM::isOpenJ9() && _cstack == CSTACK_DEFAULT && DWARF_SUPPORTED) {
-        // OpenJ9 libs are compiled with frame pointers omitted
-        _cstack = CSTACK_DWARF;
+    if (_cstack == CSTACK_DEFAULT) {
+        if (VMStructs::hasStackStructs()) {
+            // Use VMStructs by default when possible
+            _cstack = args._cstack = CSTACK_VM;
+        } else if (VM::isOpenJ9() && DWARF_SUPPORTED) {
+            // OpenJ9 libs are compiled with frame pointers omitted
+            _cstack = args._cstack = CSTACK_DWARF;
+        }
     }
 
     // Kernel symbols are useful only for perf_events without --all-user
@@ -1237,11 +1249,17 @@ Error Profiler::start(Arguments& args, bool reset) {
             goto error5;
         }
     }
+    if (_event_mask & EM_METHOD_TRACE) {
+        error = instrument.start(args);
+        if (error) {
+            goto error6;
+        }
+    }
 
     switchThreadEvents(JVMTI_ENABLE);
 
     _state = RUNNING;
-    _start_time = time(NULL);
+    _start_time = OS::micros();
     _epoch++;
 
     if (args._timeout != 0 || args._output == OUTPUT_JFR) {
@@ -1250,6 +1268,9 @@ Error Profiler::start(Arguments& args, bool reset) {
     }
 
     return Error::OK;
+
+error6:
+    if (_event_mask & EM_METHOD_TRACE) instrument.stop();
 
 error5:
     if (_event_mask & EM_NATIVEMEM) malloc_tracer.stop();
@@ -1320,6 +1341,7 @@ Error Profiler::stop(bool restart) {
     if (_event_mask & EM_LOCK) lock_tracer.stop();
     if (_event_mask & EM_ALLOC) _alloc_engine->stop();
     if (_event_mask & EM_NATIVEMEM) malloc_tracer.stop();
+    if (_event_mask & EM_METHOD_TRACE) instrument.stop();
 
     _engine->stop();
 
@@ -1369,6 +1391,9 @@ Error Profiler::check(Arguments& args) {
     if (!error && args._lock >= 0) {
         error = lock_tracer.check(args);
     }
+    if (!error && !args._trace.empty()) {
+        error = instrument.check(args);
+    }
 
     if (!error) {
         if (args._wall >= 0 && _engine == &wall_clock) {
@@ -1379,7 +1404,7 @@ Error Profiler::check(Arguments& args) {
             return Error("DWARF unwinding is not supported on this platform");
         } else if (args._cstack == CSTACK_LBR && _engine != &perf_events) {
             return Error("Branch stack is supported only with PMU events");
-        } else if (args._cstack >= CSTACK_VM && !VMStructs::hasStackStructs()) {
+        } else if (args._cstack == CSTACK_VM && VM::loaded() && !VMStructs::hasStackStructs()) {
             return Error("VMStructs stack walking is not supported on this JVM/platform");
         }
     }
@@ -1434,6 +1459,9 @@ Error Profiler::dump(Writer& out, Arguments& args) {
                 unlockAll();
             }
             break;
+        case OUTPUT_OTLP:
+            dumpOtlp(out, args);
+            break;
         default:
             return Error("No output format selected");
     }
@@ -1444,7 +1472,7 @@ Error Profiler::dump(Writer& out, Arguments& args) {
 void Profiler::printUsedMemory(Writer& out) {
     size_t call_trace_storage = _call_trace_storage.usedMemory();
     size_t flight_recording = _jfr.usedMemory();
-    size_t dictionaries = _class_map.usedMemory() + _symbol_map.usedMemory() + _thread_filter.usedMemory();
+    size_t dictionaries = _class_map.usedMemory() + _thread_filter.usedMemory();
 
     size_t code_cache = _runtime_stubs.usedMemory();
     int native_lib_count = _native_libs.count();
@@ -1563,6 +1591,10 @@ void Profiler::dumpFlameGraph(Writer& out, Arguments& args, bool tree) {
                     const char* frame_name = fn.name(trace->frames[--num_frames]);
                     f = flamegraph.addChild(f, frame_name, FRAME_NATIVE, counter);
                 }
+                if (_add_cpu_frame) {
+                    const char* frame_name = fn.name(trace->frames[--num_frames]);
+                    f = flamegraph.addChild(f, frame_name, FRAME_NATIVE, counter);
+                }
 
                 for (int j = 0; j < num_frames; j++) {
                     const char* frame_name = fn.name(trace->frames[j]);
@@ -1675,15 +1707,145 @@ void Profiler::dumpText(Writer& out, Arguments& args) {
     }
 }
 
-time_t Profiler::addTimeout(time_t start, int timeout) {
-    if (timeout == 0) {
-        return (time_t)0x7fffffff;
-    } else if (timeout > 0) {
-        return start + timeout;
+static void recordSampleType(ProtoBuffer& otlp_buffer, Index& strings, const char* type, const char* units) {
+    using namespace Otlp;
+    protobuf_mark_t sample_type_mark = otlp_buffer.startMessage(Profile::sample_type, 1);
+    otlp_buffer.field(ValueType::type_strindex, strings.indexOf(type));
+    otlp_buffer.field(ValueType::unit_strindex, strings.indexOf(units));
+    otlp_buffer.field(ValueType::aggregation_temporality, AggregationTemporality::cumulative);
+    otlp_buffer.commitMessage(sample_type_mark);
+}
+
+void Profiler::dumpOtlp(Writer& out, Arguments& args) {
+    using namespace Otlp;
+    ProtoBuffer otlp_buffer(OTLP_BUFFER_INITIAL_SIZE);
+    Index strings;
+    Index functions;
+    // Eventually this is going to be Index<Attribute>, for now we keep it simple
+    Index thread_names;
+
+    protobuf_mark_t resource_profiles_mark = otlp_buffer.startMessage(ProfilesData::resource_profiles);
+    protobuf_mark_t scope_profiles_mark = otlp_buffer.startMessage(ResourceProfiles::scope_profiles);
+    protobuf_mark_t profile_mark = otlp_buffer.startMessage(ScopeProfiles::profiles);
+
+    u64 time_nanos = _start_time * 1000ULL;
+    u64 duration_nanos = (OS::micros() - _start_time) * 1000ULL;
+
+    otlp_buffer.field(Profile::time_nanos, time_nanos);
+    otlp_buffer.field(Profile::duration_nanos, duration_nanos);
+
+    recordSampleType(otlp_buffer, strings, _engine->type(), "count");
+    recordSampleType(otlp_buffer, strings, _engine->type(), _engine->units());
+
+    std::vector<CallTraceSample*> call_trace_samples;
+    _call_trace_storage.collectSamples(call_trace_samples);
+
+    std::vector<size_t> location_indices;
+    location_indices.reserve(call_trace_samples.size());
+
+    FrameName fn(args, args._style & ~STYLE_ANNOTATE, _epoch, _thread_names_lock, _thread_names);
+    size_t frames_seen = 0;
+    for (const auto& cts : call_trace_samples) {
+        CallTrace* trace = cts->acquireTrace();
+        if (trace == NULL || excludeTrace(&fn, trace) || cts->samples == 0) continue;
+
+        protobuf_mark_t sample_mark = otlp_buffer.startMessage(Profile::sample, 1);
+        otlp_buffer.field(Sample::locations_start_index, frames_seen);
+        otlp_buffer.field(Sample::locations_length, trace->num_frames);
+
+        u32 thread_name_idx = 0;
+        for (int j = 0; j < trace->num_frames; j++) {
+            if (trace->frames[j].bci == BCI_THREAD_ID) {
+                int tid = (int)(uintptr_t) trace->frames[j].method_id;
+                MutexLocker ml(_thread_names_lock);
+                ThreadMap::iterator it = _thread_names.find(tid);
+                if (it != _thread_names.end()) {
+                    thread_name_idx = thread_names.indexOf(it->second);
+                }
+                continue;
+            }
+
+            // To be written below in Profile.location_indices
+            location_indices.push_back(functions.indexOf(fn.name(trace->frames[j])));
+            ++frames_seen;
+        }
+        if (thread_name_idx != 0) {
+            otlp_buffer.field(Sample::attribute_indices, thread_name_idx);
+        }
+
+        protobuf_mark_t sample_value_mark = otlp_buffer.startMessage(Sample::value, 1);
+        otlp_buffer.putVarInt(cts->samples);
+        otlp_buffer.putVarInt(cts->counter);
+        otlp_buffer.commitMessage(sample_value_mark);
+        otlp_buffer.commitMessage(sample_mark);
     }
 
+    protobuf_mark_t location_indices_mark = otlp_buffer.startMessage(Profile::location_indices);
+    for (size_t i : location_indices) {
+        otlp_buffer.putVarInt(i);
+    }
+    otlp_buffer.commitMessage(location_indices_mark);
+
+    otlp_buffer.commitMessage(profile_mark);
+    otlp_buffer.commitMessage(scope_profiles_mark);
+    otlp_buffer.commitMessage(resource_profiles_mark);
+
+    protobuf_mark_t dictionary_mark = otlp_buffer.startMessage(ProfilesData::dictionary);
+
+    // Write mapping_table. Not currently used, but required by some parsers
+    protobuf_mark_t mapping_mark = otlp_buffer.startMessage(ProfilesDictionary::mapping_table, 1);
+    otlp_buffer.commitMessage(mapping_mark);
+
+    // Write function_table
+    functions.forEachOrdered([&] (size_t idx, const std::string& function_name) {
+        protobuf_mark_t function_mark = otlp_buffer.startMessage(ProfilesDictionary::function_table, 1);
+        otlp_buffer.field(Function::name_strindex, strings.indexOf(function_name));
+        otlp_buffer.commitMessage(function_mark);
+    });
+
+    // Write location_table
+    for (size_t function_idx = 0; function_idx < functions.size(); ++function_idx) {
+        protobuf_mark_t location_mark = otlp_buffer.startMessage(ProfilesDictionary::location_table, 1);
+        // TODO: set to the proper mapping when new mappings are added.
+        // For now we keep a dummy default mapping_index for all locations because some parsers
+        // would fail otherwise
+        otlp_buffer.field(Location::mapping_index, (u64)0);
+        protobuf_mark_t line_mark = otlp_buffer.startMessage(Location::line, 1);
+        otlp_buffer.field(Line::function_index, function_idx);
+        otlp_buffer.commitMessage(line_mark);
+        otlp_buffer.commitMessage(location_mark);
+    }
+
+    // Write string_table
+    strings.forEachOrdered([&] (size_t idx, const std::string& s) {
+        otlp_buffer.field(ProfilesDictionary::string_table, s.data(), s.length());
+    });
+
+    // Write attribute_table (only threads for now)
+    thread_names.forEachOrdered([&] (size_t idx, const std::string& s) {
+        protobuf_mark_t attr_mark = otlp_buffer.startMessage(ProfilesDictionary::attribute_table);
+        otlp_buffer.field(Key::key, OTLP_THREAD_NAME);
+        protobuf_mark_t value_mark = otlp_buffer.startMessage(Key::value);
+        otlp_buffer.field(AnyValue::string_value, s.data(), s.length());
+        otlp_buffer.commitMessage(value_mark);
+        otlp_buffer.commitMessage(attr_mark);
+    });
+
+    otlp_buffer.commitMessage(dictionary_mark);
+
+    out.write((const char*) otlp_buffer.data(), otlp_buffer.offset());
+}
+
+u64 Profiler::addTimeout(u64 start_micros, int timeout) {
+    if (timeout == 0) {
+        return 0x7fffffffffffffffULL;
+    } else if (timeout > 0) {
+        return start_micros + (u64)timeout * 1000000ULL;
+    }
+
+    time_t start_seconds = start_micros / 1000000ULL;
     struct tm t;
-    localtime_r(&start, &t);
+    localtime_r(&start_seconds, &t);
 
     int hh = (timeout >> 16) & 0xff;
     if (hh < 24) {
@@ -1699,10 +1861,10 @@ time_t Profiler::addTimeout(time_t start, int timeout) {
     }
 
     time_t result = mktime(&t);
-    if (result <= start) {
+    if (result <= start_seconds) {
         result += (hh < 24 ? 86400 : (mm < 60 ? 3600 : 60));
     }
-    return result;
+    return (u64)result * 1000000ULL;
 }
 
 void Profiler::startTimer() {
@@ -1750,8 +1912,7 @@ void Profiler::stopTimer() {
 
 void Profiler::timerLoop(void* timer_id) {
     u64 current_micros = OS::micros();
-    u64 stop_micros = _stop_time * 1000000ULL;
-    u64 sleep_until = _jfr.active() ? current_micros + 1000000 : stop_micros;
+    u64 sleep_until = _jfr.active() ? current_micros + 1000000 : _stop_time;
 
     while (true) {
         {
@@ -1763,7 +1924,7 @@ void Profiler::timerLoop(void* timer_id) {
             if (_timer_id != timer_id) return;
         }
 
-        if ((current_micros = OS::micros()) >= stop_micros) {
+        if ((current_micros = OS::micros()) >= _stop_time) {
             restart(_global_args);
             return;
         }

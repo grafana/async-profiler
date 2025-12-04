@@ -19,6 +19,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <linux/perf_event.h>
 #include "arch.h"
 #include "fdtransferClient.h"
@@ -153,6 +154,17 @@ static void adjustFDLimit() {
     }
 }
 
+// Workaround for the kernel bug: PERF_EVENT_IOC_REFRESH can hang
+// the entire system on Linux 6.16.x and 6.17.x.
+// See https://github.com/async-profiler/async-profiler/issues/1578
+static bool hasPerfEventRefreshBug() {
+    static struct utsname u{};
+    if (u.release[0] == 0 && uname(&u) != 0) {
+        return false;
+    }
+    return strncmp(u.release, "6.16.", 5) == 0 || strncmp(u.release, "6.17.", 5) == 0;
+}
+
 struct FunctionWithCounter {
     const char* name;
     int counter_arg;
@@ -181,7 +193,7 @@ struct PerfEventType {
     static PerfEventType AVAILABLE_EVENTS[];
     static FunctionWithCounter KNOWN_FUNCTIONS[];
 
-    static char probe_func[256];
+    static char probe_func[MAX_PROBE_LEN];
 
     // Find which argument of a known function serves as a profiling counter,
     // e.g. the first argument of malloc() is allocation size
@@ -367,6 +379,9 @@ struct PerfEventType {
     }
 
     static PerfEventType* forName(const char* name) {
+        // Reset probe_func, since it is used in FdTransferClient
+        probe_func[0] = 0;
+
         // "cpu" is an alias for "cpu-clock"
         if (strcmp(name, EVENT_CPU) == 0) {
             return &AVAILABLE_EVENTS[IDX_CPU];
@@ -487,7 +502,7 @@ FunctionWithCounter PerfEventType::KNOWN_FUNCTIONS[] = {
     {NULL}
 };
 
-char PerfEventType::probe_func[256];
+char PerfEventType::probe_func[MAX_PROBE_LEN];
 
 
 class RingBuffer {
@@ -529,8 +544,10 @@ class PerfEvent : public SpinLock {
 int PerfEvents::_max_events = 0;
 PerfEvent* PerfEvents::_events = NULL;
 PerfEventType* PerfEvents::_event_type = NULL;
+int PerfEvents::_ioc_enable;
 bool PerfEvents::_alluser;
 bool PerfEvents::_kernel_stack;
+bool PerfEvents::_record_cpu;
 int PerfEvents::_target_cpu;
 
 int PerfEvents::createForThread(int tid) {
@@ -590,9 +607,13 @@ int PerfEvents::createForThread(int tid) {
 #warning "Compiling without LBR support. Kernel headers 4.1+ required"
 #endif
 
+    if (_record_cpu) {
+        attr.sample_type |= PERF_SAMPLE_CPU;
+    }
+
     int fd;
     if (FdTransferClient::hasPeer()) {
-        fd = FdTransferClient::requestPerfFd(&tid, _target_cpu, &attr);
+        fd = FdTransferClient::requestPerfFd(&tid, _target_cpu, &attr, PerfEventType::probe_func);
     } else {
         fd = syscall(__NR_perf_event_open, &attr, tid, _target_cpu, -1, PERF_FLAG_FD_CLOEXEC);
         if (fd == -1 && errno == EINVAL) {
@@ -633,7 +654,7 @@ int PerfEvents::createForThread(int tid) {
     if (fcntl(fd, F_SETFL, O_ASYNC) < 0 || fcntl(fd, F_SETSIG, _signal) < 0 || fcntl(fd, F_SETOWN_EX, &ex) < 0) {
         err = errno;
         Log::warn("perf_event fcntl failed: %s", strerror(err));
-    } else if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) < 0 || ioctl(fd, PERF_EVENT_IOC_REFRESH, 1) < 0) {
+    } else if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) < 0 || ioctl(fd, _ioc_enable, 1) < 0) {
         err = errno;
         Log::warn("perf_event ioctl failed: %s", strerror(err));
     } else {
@@ -689,6 +710,10 @@ void PerfEvents::signalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
         return;
     }
 
+    if (_ioc_enable == PERF_EVENT_IOC_ENABLE) {
+        ioctl(siginfo->si_fd, PERF_EVENT_IOC_DISABLE, 0);
+    }
+
     if (_enabled) {
         ExecutionEvent event(TSC::ticks());
         u64 counter = readCounter(siginfo, ucontext);
@@ -698,13 +723,17 @@ void PerfEvents::signalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
     }
 
     ioctl(siginfo->si_fd, PERF_EVENT_IOC_RESET, 0);
-    ioctl(siginfo->si_fd, PERF_EVENT_IOC_REFRESH, 1);
+    ioctl(siginfo->si_fd, _ioc_enable, 1);
 }
 
 void PerfEvents::signalHandlerJ9(int signo, siginfo_t* siginfo, void* ucontext) {
     if (siginfo->si_code <= 0) {
         // Looks like an external signal; don't treat as a profiling event
         return;
+    }
+
+    if (_ioc_enable == PERF_EVENT_IOC_ENABLE) {
+        ioctl(siginfo->si_fd, PERF_EVENT_IOC_DISABLE, 0);
     }
 
     if (_enabled) {
@@ -718,7 +747,7 @@ void PerfEvents::signalHandlerJ9(int signo, siginfo_t* siginfo, void* ucontext) 
     }
 
     ioctl(siginfo->si_fd, PERF_EVENT_IOC_RESET, 0);
-    ioctl(siginfo->si_fd, PERF_EVENT_IOC_REFRESH, 1);
+    ioctl(siginfo->si_fd, _ioc_enable, 1);
 }
 
 const char* PerfEvents::title() {
@@ -775,6 +804,10 @@ Error PerfEvents::check(Arguments& args) {
     }
 #endif
 
+    if (args._record_cpu) {
+        attr.sample_type |= PERF_SAMPLE_CPU;
+    }
+
     int fd = syscall(__NR_perf_event_open, &attr, 0, args._target_cpu, -1, 0);
     if (fd == -1) {
         return Error(strerror(errno));
@@ -797,6 +830,7 @@ Error PerfEvents::start(Arguments& args) {
     }
 
     _target_cpu = args._target_cpu;
+    _record_cpu = args._record_cpu;
 
     if (args._interval < 0) {
         return Error("interval must be positive");
@@ -815,6 +849,13 @@ Error PerfEvents::start(Arguments& args) {
         _kernel_stack = false;
         // Automatically switch on alluser for non-CPU events, if kernel profiling is unavailable
         _alluser = strcmp(args._event, EVENT_CPU) != 0 && !supported();
+    }
+
+    if (strcmp(_event_type->name, "cpu-clock") == 0 && hasPerfEventRefreshBug()) {
+        Log::debug("Enable workaround for PERF_EVENT_IOC_REFRESH bug");
+        _ioc_enable = PERF_EVENT_IOC_ENABLE;   // opt-in for manual enable/disable
+    } else {
+        _ioc_enable = PERF_EVENT_IOC_REFRESH;  // autodisable perf_event on counter overflow
     }
 
     adjustFDLimit();
@@ -880,7 +921,12 @@ int PerfEvents::walk(int tid, void* ucontext, const void** callchain, int max_de
 
         while (tail < head) {
             struct perf_event_header* hdr = ring.seek(tail);
+
             if (hdr->type == PERF_RECORD_SAMPLE) {
+                if (_record_cpu) {
+                    java_ctx->cpu = ring.next();
+                }
+
                 u64 nr = ring.next();
                 while (nr-- > 0) {
                     u64 ip = ring.next();

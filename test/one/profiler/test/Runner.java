@@ -7,13 +7,11 @@ package one.profiler.test;
 
 import java.io.File;
 import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
 
 public class Runner {
     private static final Logger log = Logger.getLogger(Runner.class.getName());
@@ -23,7 +21,6 @@ public class Runner {
     private static final Jvm currentJvm = detectJvm();
     private static final int currentJvmVersion = detectJvmVersion();
 
-    private static final Set<String> skipTests = new HashSet<>();
     private static final String logDir = System.getProperty("logDir", "");
 
     private static Os detectOs() {
@@ -99,12 +96,6 @@ public class Runner {
         return Integer.parseInt(prop);
     }
 
-    private static boolean enabled(RunnableTest rt) {
-        return rt.test().enabled() &&
-                !skipTests.contains(rt.className().toLowerCase()) &&
-                !skipTests.contains(rt.method().getName().toLowerCase());
-    }
-
     private static boolean applicable(Test test) {
         Os[] os = test.os();
         Arch[] arch = test.arch();
@@ -116,8 +107,8 @@ public class Runner {
                 (jvmVer.length == 0 || (currentJvmVersion >= jvmVer[0] && currentJvmVersion <= jvmVer[jvmVer.length - 1]));
     }
 
-    private static TestResult run(RunnableTest rt) {
-        if (!enabled(rt)) {
+    private static TestResult run(RunnableTest rt, TestDeclaration decl) {
+        if (!rt.test().enabled() || decl.skips(rt.method())) {
             return TestResult.skipDisabled();
         }
         if (!applicable(rt.test())) {
@@ -132,35 +123,15 @@ public class Runner {
                     rt.method().getDeclaringClass().getDeclaredConstructor().newInstance() : null;
             rt.method().invoke(holder, p);
         } catch (InvocationTargetException e) {
+            if (e.getTargetException() instanceof NoClassDefFoundError) {
+                return TestResult.skipMissingJar();
+            }
             return TestResult.fail(e.getTargetException());
         } catch (Throwable e) {
             return TestResult.fail(e);
         }
 
         return TestResult.pass();
-    }
-
-    private static List<RunnableTest> getRunnableTests(Class<?> cls) {
-        List<RunnableTest> rts = new ArrayList<>();
-        for (Method m : cls.getMethods()) {
-            for (Test t : m.getAnnotationsByType(Test.class)) {
-                rts.add(new RunnableTest(m, t));
-            }
-        }
-        return rts;
-    }
-
-    private static List<RunnableTest> getRunnableTests(String[] args) throws ClassNotFoundException {
-        List<RunnableTest> rts = new ArrayList<>();
-        for (String arg : args) {
-            String testName = arg;
-            if (testName.indexOf('.') < 0 && Character.isLowerCase(testName.charAt(0))) {
-                // Convert package name to class name
-                testName = "test." + testName + "." + Character.toUpperCase(testName.charAt(0)) + testName.substring(1) + "Tests";
-            }
-            rts.addAll(getRunnableTests(Class.forName(testName)));
-        }
-        return rts;
     }
 
     private static void configureLogging() {
@@ -182,15 +153,6 @@ public class Runner {
         }
     }
 
-    private static void configureSkipTests() {
-        String skipProperty = System.getProperty("skip");
-        if (skipProperty != null && !skipProperty.isEmpty()) {
-            for (String skip : skipProperty.split(",")) {
-                skipTests.add(skip.toLowerCase());
-            }
-        }
-    }
-
     private static void printSummary(EnumMap<TestStatus, Integer> statusCounts, List<String> failedTests, long totalTestDuration, int testCount) {
         int fail = statusCounts.getOrDefault(TestStatus.FAIL, 0);
         if (fail > 0) {
@@ -207,27 +169,33 @@ public class Runner {
         System.out.println("FAIL: " + fail);
         System.out.println("SKIP (disabled): " + statusCounts.getOrDefault(TestStatus.SKIP_DISABLED, 0));
         System.out.println("SKIP (config mismatch): " + statusCounts.getOrDefault(TestStatus.SKIP_CONFIG_MISMATCH, 0));
+        System.out.println("SKIP (missing JAR): " + statusCounts.getOrDefault(TestStatus.SKIP_MISSING_JAR, 0));
         System.out.println("TOTAL: " + testCount);
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length == 0) {
-            System.out.println("Usage: java " + Runner.class.getName() + " TestName ...");
-            System.exit(1);
-        }
-
         configureLogging();
-        configureSkipTests();
 
-        List<RunnableTest> allTests = getRunnableTests(args);
+        TestDeclaration decl = TestDeclaration.parse(args);
+        List<RunnableTest> allTests = decl.getRunnableTests();
         final int testCount = allTests.size();
+        final int retryCount = Integer.parseInt(System.getProperty("retryCount", "0"));
+
         int i = 1;
         long totalTestDuration = 0;
         List<String> failedTests = new ArrayList<>();
         EnumMap<TestStatus, Integer> statusCounts = new EnumMap<>(TestStatus.class);
         for (RunnableTest rt : allTests) {
             long start = System.nanoTime();
-            TestResult result = run(rt);
+            TestResult result = run(rt, decl);
+
+            int attempt = 1;
+            while (result.status() == TestStatus.FAIL && attempt <= retryCount) {
+                log.log(Level.WARNING, "Test failed, retrying (attempt " + attempt + "/" + retryCount + ")...");
+                result = run(rt, decl);
+                attempt++;
+            }
+
             long durationNs = System.nanoTime() - start;
 
             totalTestDuration += durationNs;
