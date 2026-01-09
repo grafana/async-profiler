@@ -59,6 +59,9 @@ class WallClockEvent : public Event {
     u64 _time_span;
     ThreadState _thread_state;
     u32 _samples;
+    u64 _span_id;
+    u64 _span_name;
+    u64 _context_id;
 };
 
 class AllocEvent : public EventWithClassId {
