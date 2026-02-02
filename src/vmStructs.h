@@ -9,6 +9,7 @@
 #include <jvmti.h>
 #include <stdint.h>
 #include <string.h>
+#include <type_traits>
 #include "codeCache.h"
 
 
@@ -25,6 +26,7 @@ class VMStructs {
     static bool _has_class_loader_data;
     static bool _has_native_thread_id;
     static bool _has_perm_gen;
+    static bool _can_dereference_jmethod_id;
     static bool _compact_object_headers;
 
     static int _klass_name_offset;
@@ -40,7 +42,6 @@ class VMStructs {
     static int _thread_anchor_offset;
     static int _thread_state_offset;
     static int _thread_vframe_offset;
-    static int _thread_exception_offset;
     static int _osthread_id_offset;
     static int _call_wrapper_anchor_offset;
     static int _comp_env_offset;
@@ -49,10 +50,13 @@ class VMStructs {
     static int _anchor_sp_offset;
     static int _anchor_pc_offset;
     static int _anchor_fp_offset;
+    static int _blob_size_offset;
     static int _frame_size_offset;
     static int _frame_complete_offset;
     static int _code_offset;
     static int _data_offset;
+    static int _mutable_data_offset;
+    static int _relocation_size_offset;
     static int _scopes_pcs_offset;
     static int _scopes_data_offset;
     static int _nmethod_name_offset;
@@ -114,6 +118,8 @@ class VMStructs {
     static jfieldID _tid;
     static jfieldID _klass;
     static int _tls_index;
+    static intptr_t _env_offset;
+    static void* _java_thread_vtbl[6];
 
     typedef void (*LockFunc)(void*);
     static LockFunc _lock_func;
@@ -137,6 +143,7 @@ class VMStructs {
 
     template<typename T>
     static T align(const void* ptr) {
+        static_assert(std::is_pointer<T>::value, "T must be a pointer type");
         return (T)((uintptr_t)ptr & ~(sizeof(T) - 1));
     }
 
@@ -325,6 +332,33 @@ class JavaFrameAnchor : VMStructs {
     void setLastJavaPC(const void* pc) {
         *(const void**) at(_anchor_pc_offset) = pc;
     }
+
+    bool getFrame(const void*& pc, uintptr_t& sp, uintptr_t& fp) {
+        if (lastJavaPC() == NULL || lastJavaSP() == 0) {
+            return false;
+        }
+        pc = lastJavaPC();
+        sp = lastJavaSP();
+        fp = lastJavaFP();
+        return true;
+    }
+
+    // Similar to getFrame, but handles partially saved frames.
+    // Relevant for allocation hooks executed in _thread_in_vm state.
+    bool restoreFrame(const void*& pc, uintptr_t& sp, uintptr_t& fp) {
+        if (lastJavaSP() == 0) {
+            return false;
+        }
+
+        sp = lastJavaSP();
+        if ((fp = lastJavaFP()) == 0) {
+            fp = sp;
+        }
+        if ((pc = lastJavaPC()) == NULL) {
+            pc = ((const void**)sp)[-1];
+        }
+        return true;
+    }
 };
 
 class VMThread : VMStructs {
@@ -345,9 +379,22 @@ class VMThread : VMStructs {
 
     static int nativeThreadId(JNIEnv* jni, jthread thread);
 
-    int osThreadId() {
-        const char* osthread = *(const char**) at(_thread_osthread_offset);
-        return osthread != NULL ? *(int*)(osthread + _osthread_id_offset) : -1;
+    int osThreadId();
+
+    JNIEnv* jni();
+
+    const void** vtable() {
+        return *(const void***)this;
+    }
+
+    // This thread is considered a JavaThread if at least 2 of the selected 3 vtable entries
+    // match those of a known JavaThread (which is either application thread or AttachListener).
+    // Indexes were carefully chosen to work on OpenJDK 8 to 25, both product an debug builds.
+    bool isJavaThread() {
+        const void** vtbl = vtable();
+        return (vtbl[1] == _java_thread_vtbl[1]) +
+               (vtbl[3] == _java_thread_vtbl[3]) +
+               (vtbl[5] == _java_thread_vtbl[5]) >= 2;
     }
 
     int state() {
@@ -360,10 +407,6 @@ class VMThread : VMStructs {
 
     bool inDeopt() {
         return *(void**) at(_thread_vframe_offset) != NULL;
-    }
-
-    void*& exception() {
-        return *(void**) at(_thread_exception_offset);
     }
 
     JavaFrameAnchor* anchor() {
@@ -384,11 +427,17 @@ class VMThread : VMStructs {
 
 class VMMethod : VMStructs {
   public:
-    static VMMethod* fromMethodID(jmethodID id) {
-        return *(VMMethod**)id;
-    }
-
     jmethodID id();
+
+    // Performs extra validation when VMMethod comes from incomplete frame
+    jmethodID validatedId();
+
+    // Workaround for JDK-8313816
+    static bool isStaleMethodId(jmethodID id) {
+        if (!_can_dereference_jmethod_id) return false;
+        VMMethod* vm_method = *(VMMethod**)id;
+        return vm_method == NULL || vm_method->id() == NULL;
+    }
 
     const char* bytecode() {
         return *(const char**) at(_method_constmethod_offset) + _constmethod_size;
@@ -401,6 +450,10 @@ class VMMethod : VMStructs {
 
 class NMethod : VMStructs {
   public:
+    int size() {
+        return *(int*) at(_blob_size_offset);
+    }
+
     int frameSize() {
         return *(int*) at(_frame_size_offset);
     }
@@ -449,6 +502,10 @@ class NMethod : VMStructs {
         }
     }
 
+    bool contains(const void* pc) {
+        return pc >= this && pc < at(size());
+    }
+
     bool isFrameCompleteAt(const void* pc) {
         return pc >= code() + frameCompleteOffset();
     }
@@ -471,6 +528,16 @@ class NMethod : VMStructs {
         return n != NULL && strcmp(n, "Interpreter") == 0;
     }
 
+    bool isStub() {
+        const char* n = name();
+        return n != NULL && strncmp(n, "StubRoutines", 12) == 0;
+    }
+
+    bool isVTableStub() {
+        const char* n = name();
+        return n != NULL && strcmp(n, "vtable chunks") == 0;
+    }
+
     VMMethod* method() {
         return *(VMMethod**) at(_nmethod_method_offset);
     }
@@ -488,7 +555,11 @@ class NMethod : VMStructs {
     }
 
     VMMethod** metadata() {
-        if (_data_offset > 0) {
+        if (_mutable_data_offset >= 0) {
+            // Since JDK 25
+            return (VMMethod**) (*(char**) at(_mutable_data_offset) + *(int*) at(_relocation_size_offset));
+        } else if (_data_offset > 0) {
+            // since JDK 23
             return (VMMethod**) at(*(int*) at(_data_offset) + *(unsigned short*) at(_nmethod_metadata_offset));
         }
         return (VMMethod**) at(*(int*) at(_nmethod_metadata_offset));

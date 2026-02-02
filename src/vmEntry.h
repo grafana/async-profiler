@@ -50,6 +50,7 @@ enum ASGCT_CallFrameType {
     BCI_THREAD_ID           = -16,  // method_id designates a thread
     BCI_ADDRESS             = -17,  // method_id is a PC address
     BCI_ERROR               = -18,  // method_id is an error string
+    BCI_CPU                 = -19,  // method_id is the cpu the sample was taken on
 };
 
 // See hotspot/src/share/vm/prims/forte.cpp
@@ -85,6 +86,8 @@ typedef void (*AsyncGetCallTrace)(ASGCT_CallTrace*, jint, void*);
 
 typedef jlong (*JVM_MemoryFunc)();
 
+typedef jint (*GetCreatedJavaVMs)(JavaVM**, jsize, jsize*);
+
 typedef struct {
     void* unused1[86];
     jvmtiError (JNICALL *RedefineClasses)(jvmtiEnv*, jint, const jvmtiClassDefinition*);
@@ -102,6 +105,10 @@ class VM {
     static bool _openj9;
     static bool _zing;
 
+    static bool _terminating;
+
+    static GetCreatedJavaVMs _getCreatedJavaVMs;
+
     static jvmtiError (JNICALL *_orig_RedefineClasses)(jvmtiEnv*, jint, const jvmtiClassDefinition*);
     static jvmtiError (JNICALL *_orig_RetransformClasses)(jvmtiEnv*, jint, const jclass* classes);
 
@@ -109,6 +116,7 @@ class VM {
     static void applyPatch(char* func, const char* patch, const char* end_patch);
     static void loadMethodIDs(jvmtiEnv* jvmti, JNIEnv* jni, jclass klass);
     static void loadAllMethodIDs(jvmtiEnv* jvmti, JNIEnv* jni);
+    static bool hasJvmThreads();
 
   public:
     static AsyncGetCallTrace _asyncGetCallTrace;
@@ -116,6 +124,8 @@ class VM {
     static JVM_MemoryFunc _freeMemory;
 
     static bool init(JavaVM* vm, bool attach);
+
+    static void tryAttach();
 
     static bool loaded() {
         return _jvmti != NULL;
@@ -150,6 +160,11 @@ class VM {
 
     static bool isZing() {
         return _zing;
+    }
+
+    // No synchronization, should only be used within the same thread
+    static bool isTerminating() {
+        return _terminating;
     }
 
     static bool addSampleObjectsCapability() {

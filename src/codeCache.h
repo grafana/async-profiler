@@ -20,6 +20,9 @@ enum ImportId {
     im_dlopen,
     im_pthread_create,
     im_pthread_exit,
+    im_pthread_mutex_lock,
+    im_pthread_rwlock_rdlock,
+    im_pthread_rwlock_wrlock,
     im_pthread_setspecific,
     im_poll,
     im_malloc,
@@ -107,6 +110,7 @@ class CodeCache {
     const void* _min_address;
     const void* _max_address;
     const char* _text_base;
+    const char* _image_base;
 
     unsigned int _plt_offset;
     unsigned int _plt_size;
@@ -123,15 +127,15 @@ class CodeCache {
     CodeBlob* _blobs;
 
     void expand();
-    void makeImportsPatchable();
+    bool makeImportsPatchable();
     void saveImport(ImportId id, void** entry);
 
   public:
     CodeCache(const char* name,
               short lib_index = -1,
-              bool imports_patchable = false,
               const void* min_address = NO_MIN_ADDRESS,
-              const void* max_address = NO_MAX_ADDRESS);
+              const void* max_address = NO_MAX_ADDRESS,
+              const char* image_base = NULL);
 
     ~CodeCache();
 
@@ -145,6 +149,10 @@ class CodeCache {
 
     const void* maxAddress() const {
         return _max_address;
+    }
+
+    const char* imageBase() const {
+        return _image_base;
     }
 
     bool contains(const void* address) const {
@@ -189,7 +197,7 @@ class CodeCache {
 
     void addImport(void** entry, const char* name);
     void** findImport(ImportId id);
-    void patchImport(ImportId, void* hook_func);
+    void patchImport(ImportId id, void* hook_func);
 
     CodeBlob* findBlob(const char* name);
     CodeBlob* findBlobByAddress(const void* address);
@@ -202,6 +210,8 @@ class CodeCache {
     FrameDesc* findFrameDesc(const void* pc);
 
     size_t usedMemory();
+
+    friend class UnloadProtection;
 };
 
 
@@ -209,6 +219,7 @@ class CodeCacheArray {
   private:
     CodeCache* _libs[MAX_NATIVE_LIBS];
     int _count;
+    size_t _used_memory;
 
   public:
     CodeCacheArray() : _count(0) {
@@ -222,9 +233,14 @@ class CodeCacheArray {
         return __atomic_load_n(&_count, __ATOMIC_ACQUIRE);
     }
 
+    size_t usedMemory() {
+        return _used_memory;
+    }
+
     void add(CodeCache* lib) {
         int index = __atomic_load_n(&_count, __ATOMIC_ACQUIRE);
         _libs[index] = lib;
+        _used_memory += lib->usedMemory();
         __atomic_store_n(&_count, index + 1, __ATOMIC_RELEASE);
     }
 };

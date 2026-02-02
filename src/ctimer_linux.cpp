@@ -38,7 +38,7 @@ int CTimer::createForThread(int tid) {
     sev.sigev_value.sival_ptr = NULL;
     sev.sigev_signo = _signal;
     sev.sigev_notify = SIGEV_THREAD_ID;
-    ((int*)&sev.sigev_notify)[1] = tid;
+    (&sev.sigev_notify)[1] = tid;
 
     // Use raw syscalls, since libc wrapper allows only predefined clocks
     clockid_t clock = thread_cpu_clock(tid);
@@ -71,20 +71,6 @@ void CTimer::destroyForThread(int tid) {
     if (timer != 0 && __sync_bool_compare_and_swap(&_timers[tid], timer--, 0)) {
         syscall(__NR_timer_delete, timer);
     }
-}
-
-Error CTimer::check(Arguments& args) {
-    if (!setupThreadHook()) {
-        return Error("Could not set pthread hook");
-    }
-
-    timer_t timer;
-    if (timer_create(CLOCK_THREAD_CPUTIME_ID, NULL, &timer) < 0) {
-        return Error("Failed to create CPU timer");
-    }
-    timer_delete(timer);
-
-    return Error::OK;
 }
 
 Error CTimer::start(Arguments& args) {

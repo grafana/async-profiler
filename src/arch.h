@@ -15,8 +15,6 @@
 #  define unlikely(x)  (__builtin_expect(!!(x), 0))
 #endif
 
-#define callerPC()     __builtin_return_address(0)
-
 #ifdef _LP64
 #  define LP64_ONLY(code) code
 #else // !_LP64
@@ -67,6 +65,7 @@ const int PERF_REG_PC = 8;  // PERF_REG_X86_IP
 #define rmb()             asm volatile("lfence" : : : "memory")
 #define flushCache(addr)  asm volatile("mfence; clflush (%0); mfence" : : "r" (addr) : "memory")
 
+#define callerPC()        __builtin_return_address(0)
 #define callerFP()        __builtin_frame_address(1)
 #define callerSP()        ((void**)__builtin_frame_address(0) + 2)
 
@@ -88,6 +87,7 @@ const int PERF_REG_PC = 15;  // PERF_REG_ARM_PC
 #define rmb()             asm volatile("dmb ish" : : : "memory")
 #define flushCache(addr)  __builtin___clear_cache((char*)(addr), (char*)(addr) + sizeof(instruction_t))
 
+#define callerPC()        __builtin_return_address(0)
 #define callerFP()        __builtin_frame_address(1)
 #define callerSP()        __builtin_frame_address(1)
 
@@ -108,8 +108,9 @@ const int PERF_REG_PC = 32;  // PERF_REG_ARM64_PC
 #define rmb()             asm volatile("dmb ish" : : : "memory")
 #define flushCache(addr)  __builtin___clear_cache((char*)(addr), (char*)(addr) + sizeof(instruction_t))
 
-#define callerFP()        __builtin_frame_address(1)
-#define callerSP()        __builtin_frame_address(1)
+#define callerPC()        ({ void* pc; asm volatile("adr %0, ."  : "=r"(pc)); pc; })
+#define callerFP()        ({ void* fp; asm volatile("mov %0, fp" : "=r"(fp)); fp; })
+#define callerSP()        ({ void* sp; asm volatile("mov %0, sp" : "=r"(sp)); sp; })
 
 #elif defined(__PPC64__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 
@@ -130,6 +131,7 @@ const int PERF_REG_PC = 32;  // PERF_REG_POWERPC_NIP
 #define rmb()             asm volatile ("sync" : : : "memory") // lwsync would do but better safe than sorry
 #define flushCache(addr)  __builtin___clear_cache((char*)(addr), (char*)(addr) + sizeof(instruction_t))
 
+#define callerPC()        __builtin_return_address(0)
 #define callerFP()        __builtin_frame_address(1)
 #define callerSP()        __builtin_frame_address(0)
 
@@ -154,6 +156,7 @@ const int PERF_REG_PC = 0;      // PERF_REG_RISCV_PC
 #define rmb()             asm volatile ("fence" : : : "memory")
 #define flushCache(addr)  __builtin___clear_cache((char*)(addr), (char*)(addr) + sizeof(instruction_t))
 
+#define callerPC()        __builtin_return_address(0)
 #define callerFP()        __builtin_frame_address(1)
 #define callerSP()        __builtin_frame_address(0)
 
@@ -174,6 +177,7 @@ const int PERF_REG_PC = 0;      // PERF_REG_LOONGARCH_PC
 #define rmb()             asm volatile("dbar 0x0" : : : "memory")
 #define flushCache(addr)  __builtin___clear_cache((char*)(addr), (char*)(addr) + sizeof(instruction_t))
 
+#define callerPC()        __builtin_return_address(0)
 #define callerFP()        __builtin_frame_address(1)
 #define callerSP()        __builtin_frame_address(0)
 
@@ -184,18 +188,20 @@ const int PERF_REG_PC = 0;      // PERF_REG_LOONGARCH_PC
 #endif
 
 
-// Return address signing support.
-// Apple M1 has 47 bit virtual addresses.
+// On Apple M1 and later processors, memory is either writable or executable (W^X)
 #if defined(__aarch64__) && defined(__APPLE__)
-#  define ADDRESS_BITS 47
-#  define WX_MEMORY    true
+#  define WX_MEMORY  true
 #else
-#  define WX_MEMORY    false
+#  define WX_MEMORY  false
 #endif
 
-#ifdef ADDRESS_BITS
+// Pointer authentication (PAC) support.
+// Only 48-bit virtual addresses are currently supported.
+#ifdef __aarch64__
+const unsigned long PAC_MASK = WX_MEMORY ? 0x7fffffffffffUL : 0xffffffffffffUL;
+
 static inline const void* stripPointer(const void* p) {
-    return (const void*) ((unsigned long)p & ((1UL << ADDRESS_BITS) - 1));
+    return (const void*) ((unsigned long)p & PAC_MASK);
 }
 #else
 #  define stripPointer(p)  (p)

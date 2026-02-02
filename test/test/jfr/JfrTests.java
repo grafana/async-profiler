@@ -8,29 +8,50 @@ package test.jfr;
 import jdk.jfr.consumer.RecordedEvent;
 import jdk.jfr.consumer.RecordingFile;
 import one.profiler.test.Assert;
+import one.profiler.test.Os;
 import one.profiler.test.Output;
 import one.profiler.test.Test;
 import one.profiler.test.TestProcess;
+import test.alloc.Hello;
 
-import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 public class JfrTests {
 
-    @Test(mainClass = RegularPeak.class)
-    public void regularPeak(TestProcess p) throws Exception {
-        Output out = p.profile("-e cpu -d 6 -f %f.jfr");
-        String jfrOutPath = p.getFilePath("%f");
-        String peakPattern = "test/jfr/Cache.*calculateTop.*";
+    @Test(mainClass = CpuLoad.class, agentArgs = "start,event=cpu,file=%profile.jfr")
+    public void cpuLoad(TestProcess p) throws Exception {
+        p.waitForExit();
+        assert p.exitCode() == 0;
 
-        out = Output.convertJfrToCollapsed(jfrOutPath, "--to", "2500");
-        assert !out.contains(peakPattern);
-        out = Output.convertJfrToCollapsed(jfrOutPath,"--from", "2500", "--to", "5000");
-        assert out.samples(peakPattern) >= 1;
-        out = Output.convertJfrToCollapsed(jfrOutPath,"--from", "5000");
-        assert !out.contains(peakPattern);
+        String jfrOutPath = p.getFilePath("%profile");
+        String spikePattern = "test/jfr/CpuLoad.cpuSpike.*";
+        String normalLoadPattern = "test/jfr/CpuLoad.normalCpuLoad.*";
+
+        Output out = Output.convertJfrToCollapsed(jfrOutPath, "--to", "1500");
+        assert !out.contains(spikePattern);
+        assert out.contains(normalLoadPattern);
+
+        out = Output.convertJfrToCollapsed(jfrOutPath,"--from", "1500", "--to", "3500");
+        assert out.contains(spikePattern);
+        assert out.contains(normalLoadPattern);
+
+        out = Output.convertJfrToCollapsed(jfrOutPath,"--from", "3500");
+        assert !out.contains(spikePattern);
+        assert out.contains(normalLoadPattern);
+    }
+
+    @Test(mainClass = CpuLoad.class, agentArgs = "start,event=cpu,wall,record-cpu,file=%profile.jfr", os = Os.LINUX)
+    public void recordCpuMultiEngine(TestProcess p) throws Exception {
+        p.waitForExit();
+        assert p.exitCode() == 0;
+
+        Output out = Output.convertJfrToCollapsed(p.getFilePath("%profile"), "--wall");
+        assert !out.contains("^CPU-\\d+;");
+
+        out = Output.convertJfrToCollapsed(p.getFilePath("%profile"), "--cpu");
+        assert out.contains("^CPU-\\d+;");
     }
 
     /**
@@ -61,21 +82,124 @@ public class JfrTests {
      * @param p The test process to profile with.
      * @throws Exception Any exception thrown during profiling JFR output parsing.
      */
-    @Test(mainClass = JfrMutliModeProfiling.class, agentArgs = "start,event=cpu,alloc,lock,jfr,file=%f")
+    @Test(mainClass = JfrMultiModeProfiling.class, agentArgs = "start,event=cpu,alloc,lock=0,quiet,jfr,file=%f", output = true)
     public void parseMultiModeRecording(TestProcess p) throws Exception {
-        p.waitForExit();
+        Output output = p.waitForExit(TestProcess.STDOUT);
+        assert p.exitCode() == 0;
+
+        long totalLockDurationMillis = output.stream().mapToLong(Long::parseLong).sum();
+
+        double jfrTotalLockDurationMillis = 0;
         Map<String, Integer> eventsCount = new HashMap<>();
         try (RecordingFile recordingFile = new RecordingFile(p.getFile("%f").toPath())) {
             while (recordingFile.hasMoreEvents()) {
                 RecordedEvent event = recordingFile.readEvent();
                 String eventName = event.getEventType().getName();
+                if (eventName.equals("jdk.JavaMonitorEnter")) {
+                    jfrTotalLockDurationMillis += event.getDuration().toNanos() / 1_000_000.0;
+                }
                 eventsCount.put(eventName, eventsCount.getOrDefault(eventName, 0) + 1);
             }
         }
 
         Assert.isGreater(eventsCount.get("jdk.ExecutionSample"), 50);
-        Assert.isGreater(eventsCount.get("jdk.JavaMonitorEnter"), 50);
+        Assert.isGreater(eventsCount.get("jdk.JavaMonitorEnter"), 10);
+        Assert.isGreater(jfrTotalLockDurationMillis / totalLockDurationMillis, 0.80);
         Assert.isGreater(eventsCount.get("jdk.ObjectAllocationInNewTLAB"), 50);
+    }
+
+    /**
+     * Test to validate profiling output with "--all" flag without event override.
+     *
+     * @param p The test process to profile with.
+     * @throws Exception Any exception thrown during profiling JFR output parsing.
+     */
+    @Test(mainClass = JfrMultiModeProfiling.class, agentArgs = "start,all,file=%f.jfr", nameSuffix = "noOverride")
+    @Test(mainClass = JfrMultiModeProfiling.class, agentArgs = "start,all,alloc=262143,file=%f.jfr", nameSuffix = "overrideAlloc")
+    public void allModeNoEventOverride(TestProcess p) throws Exception {
+        p.waitForExit();
+        assert p.exitCode() == 0;
+        Set<String> events = new HashSet<>();
+        String vmSpecificationVersion = null;
+        try (RecordingFile recordingFile = new RecordingFile(p.getFile("%f").toPath())) {
+            while (recordingFile.hasMoreEvents()) {
+                RecordedEvent event = recordingFile.readEvent();
+                String eventName = event.getEventType().getName();
+
+                if (eventName.equals("jdk.InitialSystemProperty") &&
+                    event.getString("key").equals("java.vm.specification.version")) {
+                    vmSpecificationVersion = event.getString("value");
+                }
+
+                events.add(eventName);
+            }
+        }
+        if (p.currentOs() == Os.LINUX) { // macOS uses Wall Clock profiling engine
+            assert events.contains("jdk.ExecutionSample"); // cpu profiling
+        }
+        assert events.contains("jdk.JavaMonitorEnter"); // lock profiling
+        assert events.contains("jdk.ObjectAllocationInNewTLAB"); // alloc profiling
+        assert events.contains("profiler.WallClockSample"); // wall clock profiling
+        assert events.contains("profiler.LiveObject") || checkJdkVersionEarlierThan11(vmSpecificationVersion); // profiling of live objects
+        assert events.contains("profiler.Malloc"); // nativemem profiling
+        assert events.contains("profiler.Free"); // nativemem profiling
+    }
+
+    /**
+     * Test to validate profiling output with "--all" flag with event override
+     *
+     * @param p The test process to profile with.
+     * @throws Exception Any exception thrown during profiling JFR output parsing.
+     */
+    @Test(mainClass = JfrMultiModeProfiling.class, agentArgs = "start,all,event=java.util.Properties.getProperty,alloc=262143,file=%f.jfr")
+    public void allModeEventOverride(TestProcess p) throws Exception {
+        p.waitForExit();
+        assert p.exitCode() == 0;
+        Set<String> events = new HashSet<>();
+        String vmSpecificationVersion = null;
+        try (RecordingFile recordingFile = new RecordingFile(p.getFile("%f").toPath())) {
+            while (recordingFile.hasMoreEvents()) {
+                RecordedEvent event = recordingFile.readEvent();
+                String eventName = event.getEventType().getName();
+
+                if (eventName.equals("jdk.InitialSystemProperty") &&
+                    event.getString("key").equals("java.vm.specification.version")) {
+                    vmSpecificationVersion = event.getString("value");
+                }
+
+                events.add(eventName);
+                if (eventName.equals("jdk.ExecutionSample")) {
+                    // This means that only instrumented method was profiled and overall CPU profiling was skipped
+                    assert event.getStackTrace().toString().contains("java.util.Properties.getProperty");
+                }
+            }
+        }
+        assert events.contains("jdk.JavaMonitorEnter"); // lock profiling
+        assert events.contains("jdk.ObjectAllocationInNewTLAB"); // alloc profiling
+        assert events.contains("profiler.WallClockSample"); // wall clock profiling
+        assert events.contains("profiler.LiveObject") || checkJdkVersionEarlierThan11(vmSpecificationVersion); // profiling of live objects
+        assert events.contains("profiler.Malloc"); // nativemem profiling
+        assert events.contains("profiler.Free"); // nativemem profiling
+    }
+
+    // Simple smoke test, nothing in particular is tested
+    @Test(mainClass = JfrCpuProfiling.class)
+    public void jfrSyncSmoke(TestProcess p) throws Exception {
+        Output out = p.profile("-d 1 --jfrsync default --jfropts 4 -f %f.jfr");
+
+        Set<String> events = new HashSet<>();
+        try (RecordingFile recordingFile = new RecordingFile(p.getFile("%f").toPath())) {
+            while (recordingFile.hasMoreEvents()) {
+                RecordedEvent event = recordingFile.readEvent();
+                events.add(event.getEventType().getName());
+            }
+        }
+
+        assert events.contains("jdk.OSInformation");
+        assert events.contains("jdk.CPUInformation");
+        assert events.contains("jdk.JVMInformation");
+        assert events.contains("jdk.InitialSystemProperty");
+        assert events.contains("jdk.NativeLibrary");
     }
 
     /**
@@ -84,13 +208,14 @@ public class JfrTests {
      * @param p The test process to profile with.
      * @throws Exception Any exception thrown during profiling JFR output parsing.
      */
-    @Test(mainClass = Ttsp.class)
+    @Test(mainClass = Ttsp.class, agentArgs = "start,event=cpu,ttsp,interval=1ms,jfr,file=%f")
     public void ttsp(TestProcess p) throws Exception {
-        p.profile("-d 3 -i 1ms --ttsp -f %f.jfr");
+        p.waitForExit();
+        assert p.exitCode() == 0;
         assert !containsSamplesOutsideWindow(p) : "Expected no samples outside of ttsp window";
 
         Output out = Output.convertJfrToCollapsed(p.getFilePath("%f"));
-        assert out.samples("indexOfTest") >= 10;
+        assert out.samples("delaySafepoint") >= 10;
     }
 
     /**
@@ -99,10 +224,19 @@ public class JfrTests {
      * @param p The test process to profile with.
      * @throws Exception Any exception thrown during profiling JFR output parsing.
      */
-    @Test(mainClass = Ttsp.class)
+    @Test(mainClass = Ttsp.class, agentArgs = "start,event=cpu,ttsp,nostop,interval=1ms,jfr,file=%f")
     public void ttspNostop(TestProcess p) throws Exception {
-        p.profile("-d 3 -i 1ms --ttsp --nostop -f %f.jfr");
+        p.waitForExit();
+        assert p.exitCode() == 0;
         assert containsSamplesOutsideWindow(p) : "Expected to find samples outside of ttsp window";
+    }
+
+    @Test(mainClass = Hello.class, agentArgs = "start,begin=write,end=write,file=%f.jfr", output = true)
+    public void beginEnd(TestProcess p) throws Exception {
+        Output out = p.waitForExit(TestProcess.STDOUT);
+        assert p.exitCode() == 0;
+
+        assert out.contains("begin and end symbols should not resolve to the same address");
     }
 
     private boolean containsSamplesOutsideWindow(TestProcess p) throws Exception {
@@ -125,5 +259,12 @@ public class JfrTests {
             // check that the current sample takes place during a profiling window, allowing for a 10ms buffer at each end
             return entryEnd.isBefore(event.getStartTime());
         });
+    }
+
+    private static boolean checkJdkVersionEarlierThan11(String vmSpecificationVersion) {
+        if (vmSpecificationVersion == null) {
+            throw new IllegalArgumentException("vmSpecificationVersion should not be null");
+        }
+        return vmSpecificationVersion.startsWith("1.") || Integer.parseInt(vmSpecificationVersion.split("\\.")[0]) < 11;
     }
 }

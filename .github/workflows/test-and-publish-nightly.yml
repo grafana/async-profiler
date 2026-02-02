@@ -1,156 +1,164 @@
-name: Test and Publish Nightly Builds
+name: CI
 
 on:  # We are very liberal in terms of triggering builds. This should be revisited if we start seeing a lot of queueing
   - push
   - pull_request
 
-env:
-  RELEASE_FROM_JAVA_VERSION: '11'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   build-jars:
+    if: github.repository == 'async-profiler/async-profiler'
     runs-on: ubuntu-latest
+    name: build / jars
     steps:
       - name: Checkout sources
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: 'false'
-      - name: Build jars
+        uses: actions/checkout@v4
+      - name: Build JARs
         run: make jar
-      - name: Upload async-profiler.jar
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload JARs
+        uses: actions/upload-artifact@v4
         with:
-          name: async-profiler.jar
-          path: build/jar/async-profiler.jar
-      - name: Upload jfr-converter.jar
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: jfr-converter.jar
-          path: build/jar/jfr-converter.jar
-  build-binaries-and-test:
+          name: async-profiler-jars
+          path: build/jar/*
+          if-no-files-found: error
+
+  build-linux-arm64:
+    if: github.repository == 'async-profiler/async-profiler'
+    name: build / linux-arm64
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: linux-arm64
+      runner: ubuntu-24.04-arm
+      container-image: "arm:latest"
+
+  build-linux-x64:
+    if: github.repository == 'async-profiler/async-profiler'
+    name: build / linux-x64
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: linux-x64
+      runner: ubuntu-latest
+      container-image: x86:latest
+
+  build-macos:
+    if: github.repository == 'async-profiler/async-profiler'
+    name: build / macos
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: macos
+      runner: macos-15
+
+  integ-linux-x64:
+    name: integ / linux-x64
+    needs: build-linux-x64
     strategy:
+      fail-fast: false
       matrix:
-        runson:
-          - display: linux-x64
-            name: ubuntu-latest # Using "latest" here as the build and test will any ways run inside a container which we control
-        java-version: [11, 17, 21, 24]
+        test-platform: [linux-x64]
+        java-version: [8, 11, 17, 21, 25]
         java-distribution: [corretto]
-        container: ["public.ecr.aws/async-profiler/asprof-builder-x86:latest"]
+        container-image: [x86:latest]
         include:
-          - runson:
-              display: macos-14-arm64
-              name: macos-14
+          - test-platform: linux-x64-alpine
+            container-image: alpine:corretto-11
+            use-builtin-jdk: true
+            java-distribution: corretto
+            java-version: 11
+          - test-platform: linux-x64-AL2
+            container-image: amazonlinux:2
+            # GHA provides Node.js by attaching a volume to the container. The container path is
+            # '/__e/node20', and it's not writable unless we override it via 'container.volumes'.
+            container-volumes: '["/tmp/node20:/__e/node20"]'
             java-version: 11
             java-distribution: corretto
-            container: ""  # Not using container for mac-os as we have images only for linux
-          - runson:
-              display: linux-arm64
-              name: ubuntu-24.04-arm # There is no "latest" tag available (yet) as ARM runners are still in public preview
+          - test-platform: linux-x64-AL2023
+            container-image: amazonlinux:2023
             java-version: 11
             java-distribution: corretto
-            container: "public.ecr.aws/async-profiler/asprof-builder-arm:latest"
-    runs-on: ${{ matrix.runson.name }}
-    container:
-      image: ${{ matrix.container }}
-      options: --privileged
-    name: "test (${{ matrix.runson.display }}, ${{ matrix.java-distribution }} ${{ matrix.java-version }})"
-    steps:
-      - name: Setup Java for macOS x64
-        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
-        if: ${{ matrix.runson.name == 'macos-14' }}
-        with:
-          distribution: ${{ matrix.java-distribution }}
-          java-version: ${{ matrix.java-version }}
-          architecture: x64 # set up for x64, as the default arm one will override this later
-      - name: Setup Java for default architecture
-        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
-        with:
-          distribution: ${{ matrix.java-distribution }}
-          java-version: ${{ matrix.java-version }}
-          # architecture: not specifying this defaults to architecture of the runner
-      - name: Checkout sources
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: 'false'
-      - name: Build and test
-        id: build
-        run: |
-          HASH=$(echo ${{ github.sha }} | cut -c-7)
-          case "${{ matrix.runson.name }}" in
-            macos*)
-              make COMMIT_TAG=$HASH FAT_BINARY=true release test -j
-            ;;
-            *)
-              make COMMIT_TAG=$HASH CC=/usr/local/musl/bin/musl-gcc release test -j
-            ;;
-          esac
-          echo "archive=$(basename $(find . -type f -iname "async-profiler-*" ))" >> $GITHUB_OUTPUT
-      - name: Coverage
-        id: coverage
-        run: |
-          HASH=$(echo ${{ github.sha }} | cut -c-7)
-          case "${{ matrix.runson.name }}" in
-            macos*)
-              brew install gcovr
-              make COMMIT_TAG=$HASH FAT_BINARY=true coverage -j
-            ;;
-            *)
-              make COMMIT_TAG=$HASH CC=/usr/local/musl/bin/musl-gcc coverage -j
-            ;;
-          esac
-      - name: Upload test logs for default architecture
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          - test-platform: linux-x64-alpaquita
+            container-image: alpaquita:x86_64-liberica-21
+            use-builtin-jdk: true
+            java-distribution: liberica
+            java-version: 21
+    uses: ./.github/workflows/integ.yml
+    with:
+      platform: linux-x64
+      test-platform: ${{ matrix.test-platform }}
+      runner: ubuntu-latest
+      container-image: ${{ matrix.container-image }}
+      container-volumes: ${{ matrix.container-volumes || '' }}
+      java-version: ${{ matrix.java-version }}
+      java-distribution: ${{ matrix.java-distribution }}
+      use-builtin-jdk: ${{ matrix.use-builtin-jdk || false }}
 
-        if: always() # we always want to upload test logs, especially when tests fail
-        with:
-          name: test-logs-${{ matrix.runson.display }}-${{ matrix.java-version }}
-          path: |
-            build/test/logs/
-            hs_err*.log
-      - name: Upload coverage report
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+  integ-linux-arm64:
+    name: integ / linux-arm64
+    needs: build-linux-arm64
+    strategy:
+      fail-fast: false
+      matrix:
+        test-platform: [linux-arm64]
+        java-version: [8, 11, 17, 21, 25]
+        java-distribution: [corretto]
+        container-image: [arm:latest]
+    uses: ./.github/workflows/integ.yml
+    with:
+      platform: linux-arm64
+      test-platform: ${{ matrix.test-platform }}
+      runner: ubuntu-24.04-arm
+      container-image: ${{ matrix.container-image }}
+      container-volumes: ${{ matrix.container-volumes || '' }}
+      java-version: ${{ matrix.java-version }}
+      java-distribution: ${{ matrix.java-distribution }}
 
-        with:
-          name: test-coverage-${{ matrix.runson.display }}-${{ matrix.java-version }}
-          path: build/test/coverage/
-      - name: Test macOS x64
-        if: ${{ matrix.runson.name == 'macos-14' }}
-        run: JAVA_HOME=$JAVA_HOME_${{ env.JAVA_VERSION }}_X64 make test
+  integ-macos:
+    name: integ / macos
+    needs: build-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            test-platform: macos-arm64
+            java-version: "11"
+          - runner: macos-15
+            test-platform: macos-arm64
+            java-version: "21"
+          - runner: macos-15-intel
+            test-platform: macos-x64
+            java-version: "17"
+            architecture: x64
+            retry-count: 1
+    uses: ./.github/workflows/integ.yml
+    with:
+      platform: macos
+      test-platform: ${{ matrix.test-platform }}
+      runner: ${{ matrix.runner }}
+      java-version: ${{ matrix.java-version }}
+      architecture: ${{ matrix.architecture || '' }}
+      retry-count: ${{ matrix.retry-count || 0 }}
 
-      - name: Upload async-profiler binaries to workflow
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-
-        if: env.RELEASE_FROM_JAVA_VERSION == matrix.java-version
-        with:
-          name: ${{ steps.build.outputs.archive }}
-          path: ${{ steps.build.outputs.archive }}
-      - name: Upload test logs for macOS x64
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-
-        if: matrix.runson.name == 'macos-14' && always()
-        with:
-          name: test-logs-macos-14-x64-${{ matrix.java-version }}
-          path: |
-            build/test/logs/
-            hs_err*.log
   publish-only-on-push:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    name: publish (nightly)
-    runs-on: ubuntu-latest
-    needs: [build-jars, build-binaries-and-test]
     permissions:
       contents: write
+    name: publish (nightly)
+    runs-on: ubuntu-latest
+    needs: [build-jars, integ-linux-x64, integ-linux-arm64, integ-macos]
     steps:
       - name: Download async-profiler binaries and jars
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@v4
         with:
-          pattern: '*.*' # download everything except test logs
+          pattern: 'async-profiler-*'
           merge-multiple: 'true'
       - name: Delete previous release and publish new release
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        uses: actions/github-script@v7
         with:
           result-encoding: string
           script: |
