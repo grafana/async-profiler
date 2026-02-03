@@ -2,15 +2,15 @@
 
 async-profiler provides `jfrconv` utility to convert between different profile output formats.
 `jfrconv` can be found at the same location as the `asprof` binary. Converter is also available
-as a standalone Java application: [`jfr-converter.jar`](https://github.com/async-profiler/async-profiler/releases/download/v3.0/converter.jar).
+as a standalone Java application: [`jfr-converter.jar`](https://github.com/async-profiler/async-profiler/releases/download/v4.2.1/jfr-converter.jar).
 
 ## Supported conversions
 
-| Source    | html | collapsed | pprof | pb.gz | heatmap |
-| --------- | ---- | --------- | ----- | ----- | ------- |
-| jfr       | ✅   | ✅        | ✅    | ✅    | ✅      |
-| html      | ✅   | ✅        | ❌    | ❌    | ❌      |
-| collapsed | ✅   | ✅        | ❌    | ❌    | ❌      |
+| Source    | html | collapsed | pprof | pb.gz | heatmap | otlp |
+| --------- | ---- | --------- | ----- | ----- | ------- | ---- |
+| jfr       | ✅   | ✅        | ✅    | ✅    | ✅      | ✅   |
+| html      | ✅   | ✅        | ❌    | ❌    | ❌      | ❌   |
+| collapsed | ✅   | ✅        | ❌    | ❌    | ❌      | ❌   |
 
 ## Usage
 
@@ -29,27 +29,33 @@ Conversion options:
                list of frames followed by a counter. This is used by the FlameGraph script to
                generate the FlameGraph visualization of the profile data.
 
-  # flamegraph: FlameGraph is a hierarchical representation of call traces of the profiled
-                software in a color coded format that helps to identify a particular resource
-                usage like CPU and memory for the application.
+  # html: FlameGraph is a hierarchical representation of call traces of the profiled
+          software in a color coded format that helps to identify a particular resource
+          usage like CPU and memory for the application.
 
   # pprof: pprof is a profiling visualization and analysis tool from Google. More details on
-           pprof  on the official github page https://github.com/google/pprof.
+           pprof on the official github page https://github.com/google/pprof.
 
   # pb.gz: This is a compressed version of pprof output.
 
   # heatmap: A single page interactive heatmap that allows to explore profiling events
              on a timeline.
 
+  # otlp: OpenTelemetry profile format.
+
 
 JFR options:
     --cpu              Generate only CPU profile during conversion
+    --cpu-time         Generate only CPU profile, using CPUTimeSample events
     --wall             Generate only Wall clock profile during conversion
     --alloc            Generate only Allocation profile during conversion
     --live             Build allocation profile from live objects only during conversion
     --nativemem        Generate native memory allocation profile
     --leak             Only include memory leaks in nativemem
-    --lock             Generate only Lock contention profile during conversion
+    --tail RATIO       Ignore tail allocations for leak profiling (10% by default)
+    --lock             Generate only lock contention profile during conversion
+    --nativelock       Generate only native (pthread) lock contention profile
+    --trace            Convert only MethodTrace events
  -t --threads          Split stack traces by threads
  -s --state LIST       Filter thread states: runnable, sleeping, default. State name is case insensitive
                        and can be abbreviated, e.g. -s r
@@ -69,6 +75,7 @@ JFR options:
                        # an absolute time in hh:mm:ss or yyyy-MM-dd'T'hh:mm:ss format;
                        # a relative time from the beginning of recording;
                        # a relative time from the end of recording (a negative number).
+    --latency MS       Retain only samples within MethodTraces of at least MS milliseconds
 
 Flame Graph options:
     --title STRING     Convert to Flame Graph with provided title
@@ -108,7 +115,7 @@ during a conversion.
 jfrconv --cpu foo.jfr
 
 # which is equivalent to:
-# jfrconv --cpu -o flamegraph foo.jfr foo.html
+# jfrconv --cpu -o html foo.jfr foo.html
 ```
 
 for HTML output as HTML is the default format for conversion from JFR.

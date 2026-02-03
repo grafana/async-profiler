@@ -8,7 +8,6 @@ package one.profiler.test;
 import one.convert.Arguments;
 import one.convert.FlameGraph;
 import one.convert.JfrToFlame;
-import one.jfr.JfrReader;
 
 import java.io.*;
 import java.util.Arrays;
@@ -40,6 +39,10 @@ public class Output {
         return stream(regex).findAny().isPresent();
     }
 
+    public boolean containsExact(String string) {
+        return stream().anyMatch(s -> s.contains(string));
+    }
+
     public long samples(String regex) {
         return stream(regex).mapToLong(Output::extractSamples).sum();
     }
@@ -67,24 +70,19 @@ public class Output {
             fg.parseHtml(in);
         }
 
-        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-             PrintStream out = new PrintStream(outputStream)) {
-            fg.dump(out);
+        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+            fg.dump(outputStream);
             return new Output(outputStream.toString("UTF-8").split(System.lineSeparator()));
         }
     }
 
     public static Output convertJfrToCollapsed(String input, String... args) throws IOException {
-        JfrToFlame converter;
-        try (JfrReader jfr = new JfrReader(input)) {
-            Arguments arguments = new Arguments(args);
-            arguments.output = "collapsed";
-            converter = new JfrToFlame(jfr, arguments);
-            converter.convert();
-        }
+        Arguments arguments = new Arguments(args);
+        arguments.output = "collapsed";
+        FlameGraph fg = JfrToFlame.parse(input, arguments);
 
         try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
-            converter.dump(outputStream);
+            fg.dump(outputStream);
             return new Output(outputStream.toString("UTF-8").split(System.lineSeparator()));
         }
     }

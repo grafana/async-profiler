@@ -21,6 +21,8 @@ class FlightRecorder {
     void stopMasterRecording();
 
   public:
+    static const LogLevel MIN_LOG_LEVEL = LogLevel::LOG_DEBUG;
+
     FlightRecorder() : _rec(NULL) {
     }
 
@@ -38,6 +40,8 @@ class FlightRecorder {
                      EventType event_type, Event* event);
 
     void recordLog(LogLevel level, const char* message, size_t len);
+
+    static bool isJfrStarting();
 };
 
 #endif // _FLIGHTRECORDER_H

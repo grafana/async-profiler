@@ -117,9 +117,18 @@ jfrconv --total --nativemem --leak app.jfr app-leak.html
 jfrconv --total --nativemem app.jfr app-malloc.html
 ```
 
-When `--leak` option is used, the generated flame graph will show allocations without matching `free` calls. If `-nofree` is specified, every allocation will be reported as a leak:
+When `--leak` option is used, the generated flame graph will show allocations without matching `free` calls.
 
 ![nativemem flamegraph](../.assets/images/nativemem_flamegraph.png)
+
+To avoid bias towards youngest allocations not freed by the end of the profiling session,
+leak profiler ignores tail allocations made in the last 10% of the profiling period.
+Tail length can be altered with `--tail` option that accepts `ratio` or `percent%` as an argument.
+For example, to ignore allocations in the last 2 minutes of a 10 minutes profile, use
+
+```
+jfrconv --nativemem --leak --tail 20% app.jfr app-leak.html
+```
 
 The overhead of `nativemem` profiling depends on the number of native allocations,
 but is usually small enough even for production use. If required, the overhead can be reduced
@@ -136,7 +145,7 @@ Run an application with `nativemem` profiler that dumps recordings in JFR format
 LD_PRELOAD=/path/to/libasyncProfiler.so ASPROF_COMMAND=start,nativemem,total,loop=10m,cstack=dwarf,file=profile-%t.jfr NativeApp [args]
 ```
 
-Then run `jfrconv` to generate memory leak reports as flame graphs:
+Then run `jfrconv` to generate memory leak report as a flame graph:
 
 ```
 jfrconv --total --nativemem --leak <profile>.jfr <profile>-leak.html
@@ -163,6 +172,30 @@ enter this lock/monitor.
 
 Example: `asprof -e lock -t -i 5ms -f result.html 8983`
 
+## Native lock profiling
+
+`--nativelock` option tells async-profiler to measure pthread lock contention in the profiled application.
+Native lock profiling can help developers understand pthread lock acquisition patterns, lock contention (when threads
+have to wait to acquire native locks), time spent waiting for pthread mutexes and read-write locks, and which code paths
+are blocked due to native synchronization primitives.
+
+Native lock profiling works by intercepting calls to:
+
+- [`pthread_mutex_lock`](https://man7.org/linux/man-pages/man3/pthread_mutex_lock.3p.html)
+- [`pthread_rwlock_rdlock`](https://man7.org/linux/man-pages/man3/pthread_rwlock_rdlock.3p.html)
+- [`pthread_rwlock_wrlock`](https://man7.org/linux/man-pages/man3/pthread_rwlock_wrlock.3p.html)
+
+In this mode, the top frame shows the native function that experienced contention (e.g., pthread_mutex_lock_hook),
+and the counter represents the number of nanoseconds threads spent waiting to acquire the lock.
+
+Key differences from Java lock profiling:
+
+- Profiles native pthread locks instead of Java monitors.
+- Works with C/C++ applications and native libraries used by Java applications.
+- Captures contention in native code paths that Java lock profiling cannot see.
+
+Example: `asprof --nativelock 5ms -t -f result.html 8983`
+
 ## Java method profiling
 
 `-e ClassName.methodName` option instruments the given Java method
@@ -180,9 +213,14 @@ of all compiled methods. The subsequent instrumentation flushes only the _depend
 
 The massive CodeCache flush doesn't occur if attaching async-profiler as an agent.
 
-### Java native method profiling
+### Latency profiling
 
-Here are some useful native methods to profile:
+Please refer to our blog post on [latency profiling](https://github.com/async-profiler/async-profiler/discussions/1497)
+to know more about this profiling mode.
+
+## Native function profiling
+
+Here are some useful native functions to profile:
 
 - `G1CollectedHeap::humongous_obj_allocate` - trace _humongous allocations_ of the G1 GC,
 - `JVM_StartThread` - trace creation of new Java threads,
@@ -221,6 +259,40 @@ The same, when starting profiler as an agent:
 -agentpath:/path/to/libasyncProfiler.so=start,event=cpu,alloc=2m,lock=10ms,file=profile.jfr
 ```
 
+### Multi-event profiling using `--all`
+
+The `--all` flag offers a way to simultaneously enable predefined collection of common profiling events. By default, `--all` activates profiling for `cpu`, `wall`, `alloc`, `live`, `lock` and `nativemem`.
+
+**Important consideration**
+
+While the `--all` flag can be useful for development environments to get a wide overview, it is not recommended to enable this in production, especially for continuous profiling. Users are invited to select carefully what to profile and with what settings.
+
+**Sample command:**
+
+This command enables the default set of events included in `--all`:
+
+```
+asprof --all -f profile.jfr
+```
+
+or combine it with `--alloc`/`--wall`/`--lock`/`--nativemem` options to override individual settings. For example:
+
+```
+asprof --all --alloc 2m --lock 10ms -f profile.jfr
+```
+
+The same, when starting profiler as an agent:
+
+```
+-agentpath:/path/to/libasyncProfiler.so=start,all,alloc=2m,lock=10ms,file=profile.jfr
+```
+
+Instead of `cpu`, it is possible to override the `--all` parameter with any other event type of your choice. For instance, the following command will profile `cycles` along with ` wall`, `alloc`, `live`, `lock` and `nativemem`:
+
+```
+asprof --all -e cycles -f profile.jfr
+```
+
 ## Continuous profiling
 
 Continuous profiling is a means by which an application can be profiled
@@ -247,6 +319,7 @@ asprof --loop 1h -f /var/log/profile-%t.jfr 8983
 | `-e page-faults`                          | Software page faults                                                                                                                                                                                                                               |
 | `-e context-switches`                     | Context switches                                                                                                                                                                                                                                   |
 | `-e cycles`                               | Total CPU cycles                                                                                                                                                                                                                                   |
+| `-e ref-cycles`                           | CPU reference cycles, not affected by CPU frequency scaling                                                                                                                                                                                        |
 | `-e instructions`                         | Retired CPU instructions                                                                                                                                                                                                                           |
 | `-e cache-references`                     | Cache accesses (usually Last Level Cache, but may depend on the architecture)                                                                                                                                                                      |
 | `-e cache-misses`                         | Cache accesses requiring fetching data from a higher-level cache or main memory                                                                                                                                                                    |
