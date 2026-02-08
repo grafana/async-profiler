@@ -249,6 +249,9 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("sampledThread", T_THREAD, "Thread", F_CPOOL)
                 << field("stackTrace", T_STACK_TRACE, "Stack Trace", F_CPOOL)
                 << field("state", T_THREAD_STATE, "Thread State", F_CPOOL)
+                << field("spanId", T_LONG, "Span ID")
+                << field("spanName", T_LONG, "SpanName")
+                << field("contextId", T_LONG, "Context ID")
                 << field("samples", T_INT, "Samples", F_UNSIGNED)
                 << field("timeSpan", T_LONG, "Time Span", F_DURATION_TICKS))
 

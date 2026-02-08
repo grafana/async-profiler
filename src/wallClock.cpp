@@ -36,6 +36,9 @@ struct ThreadSleepState {
     u64 last_cpu_time;
     u32 call_trace_id;
     u32 counter;
+    u64 span_id;
+    u64 span_name;
+    u64 context_id;
 };
 
 typedef std::map<int, ThreadSleepState> ThreadSleepMap;
@@ -43,6 +46,9 @@ typedef std::map<int, ThreadSleepState> ThreadSleepMap;
 struct ThreadCpuTime {
     u64 cpu_time;
     u64 trace;
+    u64 span_id;
+    u64 span_name;
+    u64 context_id;
 };
 
 // MPSC ring buffer
@@ -70,9 +76,12 @@ class ThreadCpuTimeBuffer {
         __atomic_store_n(&_write_ptr, 0, __ATOMIC_RELEASE);
     }
 
-    void add(u64 trace) {
+    void add(u64 trace, u64 span_id, u64 span_name, u64 context_id) {
         ThreadCpuTime& t = _ringbuf[atomicInc(_write_ptr) & (RINGBUF_SIZE - 1)];
         t.trace = trace;
+        t.span_id = span_id;
+        t.span_name = span_name;
+        t.context_id = context_id;
         storeRelease(t.cpu_time, OS::threadCpuTime(0));
     }
 
@@ -91,6 +100,9 @@ class ThreadCpuTimeBuffer {
                 ThreadSleepState& tss = thread_sleep_state[thread_id];
                 tss.last_cpu_time = cpu_time;
                 tss.call_trace_id = (u32)trace;
+                tss.span_id = t.span_id;
+                tss.span_name = t.span_name;
+                tss.context_id = t.context_id;
                 tss.counter = 0;
                 _read_ptr++;
             }
@@ -133,9 +145,12 @@ void WallClock::signalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
         event._time_span = 0;
         event._thread_state = getThreadState(ucontext);
         event._samples = 1;
+        event._span_id = Profiler::instance()->getSpanId();
+        event._span_name = Profiler::instance()->getSpanName();
+        event._context_id = Profiler::instance()->getContextId();
         u64 trace = Profiler::instance()->recordSample(ucontext, _interval, WALL_CLOCK_SAMPLE, &event);
         if (event._thread_state == THREAD_SLEEPING && trace != 0) {
-            _thread_cpu_time_buf.add(trace);
+            _thread_cpu_time_buf.add(trace, event._span_id, event._span_name, event._context_id);
         }
     } else {
         ExecutionEvent event(TSC::ticks());
@@ -150,6 +165,9 @@ void WallClock::recordWallClock(const ThreadSleepState& tss, ThreadState state, 
     event._time_span = tss.last_time - tss.start_time;
     event._thread_state = state;
     event._samples = tss.counter;
+    event._span_id = tss.span_id;
+    event._span_name = tss.span_name;
+    event._context_id = tss.context_id;
     Profiler::instance()->recordExternalSamples(tss.counter, tss.counter * _interval, tid, tss.call_trace_id, WALL_CLOCK_SAMPLE, &event);
 }
 

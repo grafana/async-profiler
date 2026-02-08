@@ -233,11 +233,9 @@ public class JfrReader implements Closeable {
         int tid = getVarint();
         int stackTraceId = getVarint();
         int threadState = getVarint();
-        if (!wall) {
-            getVarint(); // spanId
-            getVarint(); // spanName
-            getVarint(); // contextId
-        }
+        getVarlong(); // spanId
+        getVarlong(); // spanName
+        getVarlong(); // contextId
         int samples = wall ? getVarint() : 1;
         if (wall && hasWallTimeSpan) getVarlong(); // timeSpan is ignored
         return new ExecutionSample(time, tid, stackTraceId, threadState, samples);
