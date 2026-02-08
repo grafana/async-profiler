@@ -13,14 +13,12 @@ permissions:
 
 jobs:
   license-header:
-    if: github.repository == 'async-profiler/async-profiler'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Check license headers
         uses: apache/skywalking-eyes/header@v0.6.0
   markdown:
-    if: github.repository == 'async-profiler/async-profiler'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +27,6 @@ jobs:
           npm install -g prettier@3.4.2
           make check-md
   eof-newline:
-    if: github.repository == 'async-profiler/async-profiler'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +45,6 @@ jobs:
             exit 1
           fi
   trailing-spaces:
-    if: github.repository == 'async-profiler/async-profiler'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

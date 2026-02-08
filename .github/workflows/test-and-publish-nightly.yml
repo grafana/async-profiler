@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   build-jars:
-    if: github.repository == 'async-profiler/async-profiler'
     runs-on: ubuntu-latest
     name: build / jars
     steps:
@@ -29,7 +28,6 @@ jobs:
           if-no-files-found: error
 
   build-linux-arm64:
-    if: github.repository == 'async-profiler/async-profiler'
     name: build / linux-arm64
     uses: ./.github/workflows/build.yml
     with:
@@ -38,7 +36,6 @@ jobs:
       container-image: "arm:latest"
 
   build-linux-x64:
-    if: github.repository == 'async-profiler/async-profiler'
     name: build / linux-x64
     uses: ./.github/workflows/build.yml
     with:
@@ -47,7 +44,6 @@ jobs:
       container-image: x86:latest
 
   build-macos:
-    if: github.repository == 'async-profiler/async-profiler'
     name: build / macos
     uses: ./.github/workflows/build.yml
     with:
@@ -145,7 +141,7 @@ jobs:
       retry-count: ${{ matrix.retry-count || 0 }}
 
   publish-only-on-push:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.repository == 'async-profiler/async-profiler' && github.event_name == 'push' && github.ref == 'refs/heads/master'
     permissions:
       contents: write
     name: publish (nightly)
