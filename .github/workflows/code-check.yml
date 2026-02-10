@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   cpp-lint:
-    if: github.repository == 'async-profiler/async-profiler'
     runs-on: ubuntu-latest
     container:
       image: "public.ecr.aws/async-profiler/asprof-code-check:latest"
