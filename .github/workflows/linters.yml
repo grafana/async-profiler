@@ -17,7 +17,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check license headers
-        uses: apache/skywalking-eyes/header@v0.6.0
+        run: |
+          set -euo pipefail
+          fail=0
+          check_header() {
+            local expected="$1"
+            local file="$2"
+            if ! head -n 10 "$file" | grep -Fqi "$expected"; then
+              echo "Missing license header in $file (expected: $expected)"
+              fail=1
+            fi
+          }
+
+          while IFS= read -r -d '' file; do
+            check_header "Copyright The jattach authors" "$file"
+          done < <(find src/jattach -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' -o -name '*.java' \) -print0)
+
+          while IFS= read -r -d '' file; do
+            check_header "Copyright The async-profiler authors" "$file"
+          done < <(find src test -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' -o -name '*.java' \) \
+            ! -path 'src/jattach/*' ! -path 'src/res/*' ! -name 'MANIFEST.MF' -print0)
+
+          exit "$fail"
   markdown:
     runs-on: ubuntu-latest
     steps:
