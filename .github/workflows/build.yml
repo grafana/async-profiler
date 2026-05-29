@@ -24,7 +24,7 @@ jobs:
   build:
     runs-on: ${{ inputs.runner }}
     container:
-      image: ${{ inputs.container-image && format('public.ecr.aws/async-profiler/asprof-builder-{0}', inputs.container-image) || '' }}
+      image: ${{ inputs.container-image && format('public.ecr.aws/async-profiler/asprof-builder-{0}', inputs.container-image) || '' }} # zizmor: ignore[unpinned-images]
     name: "build and unit test (${{ inputs.platform }})"
     steps:
       - name: Run container setup
@@ -42,7 +42,7 @@ jobs:
         run: |
           set -x
           HASH=${GITHUB_SHA:0:7}
-          case "${{ inputs.platform }}" in
+          case "$PLATFORM" in
             macos*)
               brew install gcovr
               make COMMIT_TAG=$HASH FAT_BINARY=true release coverage -j
@@ -56,12 +56,14 @@ jobs:
         shell: bash
         env:
           GITHUB_SHA: ${{ github.sha }}
+          PLATFORM: ${{ inputs.platform }}
       - name: Set artifact name
         id: set_artifact_name
-        run: echo "artifact_name=async-profiler-${{ inputs.platform }}-${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+        run: echo "artifact_name=async-profiler-${PLATFORM}-${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
         shell: bash
         env:
           GITHUB_SHA: ${{ github.sha }}
+          PLATFORM: ${{ inputs.platform }}
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
