@@ -62,6 +62,8 @@ class WallClockEvent : public Event {
     u64 _span_id;
     u64 _span_name;
     u64 _context_id;
+    u64 _trace_id_hi;
+    u64 _trace_id_lo;
 };
 
 class AllocEvent : public EventWithClassId {

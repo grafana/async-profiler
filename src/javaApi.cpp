@@ -69,6 +69,11 @@ Java_one_profiler_AsyncProfiler_setTracingContext0(JNIEnv* env, jobject unused, 
     Profiler::instance()->setSpanName(spanName);
 }
 
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_setTraceId0(JNIEnv* env, jobject unused, jlong hi, jlong lo) {
+    Profiler::instance()->setTraceId((u64) hi, (u64) lo);
+}
+
 extern "C" DLLEXPORT jstring JNICALL
 Java_one_profiler_AsyncProfiler_execute0(JNIEnv* env, jobject unused, jstring command) {
     Arguments args;
@@ -175,6 +180,7 @@ static const JNINativeMethod profiler_natives[] = {
     F(filterThread0,      "(Ljava/lang/Thread;Z)V"),
     F(setContextId0,      "(J)V"),
     F(setTracingContext0, "(JJ)V"),
+    F(setTraceId0,        "(JJ)V"),
 };
 
 static const JNINativeMethod* execute0 = &profiler_natives[2];

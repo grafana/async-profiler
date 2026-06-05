@@ -72,11 +72,15 @@ static ProfilingWindow profiling_window;
 static pthread_key_t local_context_id_key;
 static pthread_key_t local_span_id_key;
 static pthread_key_t local_span_name_key;
+static pthread_key_t local_trace_id_hi_key;
+static pthread_key_t local_trace_id_lo_key;
 
 void createContextId() {
     pthread_key_create(&local_context_id_key, NULL);
     pthread_key_create(&local_span_id_key, NULL);
     pthread_key_create(&local_span_name_key, NULL);
+    pthread_key_create(&local_trace_id_hi_key, NULL);
+    pthread_key_create(&local_trace_id_lo_key, NULL);
 }
 
 
@@ -1332,6 +1336,25 @@ Error Profiler::setSpanName(u64 spanName) {
 
 u64 Profiler::getSpanName() {
     void* value = pthread_getspecific(local_span_name_key);
+    return (u64) value;
+}
+
+Error Profiler::setTraceId(u64 hi, u64 lo) {
+    // Write low half first: a sampler that fires between the two writes will
+    // see the previous hi paired with the new lo, which is then filtered out
+    // server-side as a non matching trace_id rather than corrupting state.
+    pthread_setspecific(local_trace_id_lo_key, (void *) lo);
+    pthread_setspecific(local_trace_id_hi_key, (void *) hi);
+    return Error::OK;
+}
+
+u64 Profiler::getTraceIdHi() {
+    void* value = pthread_getspecific(local_trace_id_hi_key);
+    return (u64) value;
+}
+
+u64 Profiler::getTraceIdLo() {
+    void* value = pthread_getspecific(local_trace_id_lo_key);
     return (u64) value;
 }
 

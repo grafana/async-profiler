@@ -203,6 +203,9 @@ class Profiler {
     u64 getSpanId();
     Error setSpanName(u64 spanName);
     u64 getSpanName();
+    Error setTraceId(u64 hi, u64 lo);
+    u64 getTraceIdHi();
+    u64 getTraceIdLo();
     Error stop(bool restart = false);
     Error flushJfr();
     Error dump(Writer& out, Arguments& args);

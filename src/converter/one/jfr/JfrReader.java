@@ -236,6 +236,8 @@ public class JfrReader implements Closeable {
         getVarlong(); // spanId
         getVarlong(); // spanName
         getVarlong(); // contextId
+        getVarlong(); // traceIdHi
+        getVarlong(); // traceIdLo
         int samples = wall ? getVarint() : 1;
         if (wall && hasWallTimeSpan) getVarlong(); // timeSpan is ignored
         return new ExecutionSample(time, tid, stackTraceId, threadState, samples);
@@ -260,6 +262,8 @@ public class JfrReader implements Closeable {
         getVarint(); // spanId
         getVarint(); // spanName
         getVarint(); // contextId
+        getVarint(); // traceIdHi
+        getVarint(); // traceIdLo
         return new AllocationSample(time, tid, stackTraceId, classId, allocationSize, tlabSize);
     }
 
@@ -313,6 +317,8 @@ public class JfrReader implements Closeable {
         getVarint(); // spanId
         getVarint(); // spanName
         getVarint(); // contextId
+        getVarint(); // traceIdHi
+        getVarint(); // traceIdLo
         return new ContendedLock(time, tid, stackTraceId, duration, classId);
     }
 

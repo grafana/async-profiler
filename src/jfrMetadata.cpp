@@ -94,7 +94,9 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("state", T_THREAD_STATE, "Thread State", F_CPOOL)
                 << field("spanId", T_LONG, "Span ID")
                 << field("spanName", T_LONG, "SpanName")
-                << field("contextId", T_LONG, "Context ID"))
+                << field("contextId", T_LONG, "Context ID")
+                << field("traceIdHi", T_LONG, "Trace ID High")
+                << field("traceIdLo", T_LONG, "Trace ID Low"))
 
             << (type("jdk.ObjectAllocationInNewTLAB", T_ALLOC_IN_NEW_TLAB, "Allocation in new TLAB")
                 << category("Java Application")
@@ -106,7 +108,9 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("tlabSize", T_LONG, "TLAB Size", F_BYTES)
                 << field("spanId", T_LONG, "Span ID")
                 << field("spanName", T_LONG, "SpanName")
-                << field("contextId", T_LONG, "Context ID"))
+                << field("contextId", T_LONG, "Context ID")
+                << field("traceIdHi", T_LONG, "Trace ID High")
+                << field("traceIdLo", T_LONG, "Trace ID Low"))
 
             << (type("jdk.ObjectAllocationOutsideTLAB", T_ALLOC_OUTSIDE_TLAB, "Allocation outside TLAB")
                 << category("Java Application")
@@ -117,7 +121,9 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("allocationSize", T_LONG, "Allocation Size", F_BYTES)
                 << field("spanId", T_LONG, "Span ID")
                 << field("spanName", T_LONG, "SpanName")
-                << field("contextId", T_LONG, "Context ID"))
+                << field("contextId", T_LONG, "Context ID")
+                << field("traceIdHi", T_LONG, "Trace ID High")
+                << field("traceIdLo", T_LONG, "Trace ID Low"))
 
             << (type("jdk.JavaMonitorEnter", T_MONITOR_ENTER, "Java Monitor Blocked")
                 << category("Java Application")
@@ -130,7 +136,9 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("address", T_LONG, "Monitor Address", F_ADDRESS)
                 << field("spanId", T_LONG, "Span ID")
                 << field("spanName", T_LONG, "SpanName")
-                << field("contextId", T_LONG, "Context ID"))
+                << field("contextId", T_LONG, "Context ID")
+                << field("traceIdHi", T_LONG, "Trace ID High")
+                << field("traceIdLo", T_LONG, "Trace ID Low"))
 
             << (type("jdk.ThreadPark", T_THREAD_PARK, "Java Thread Park")
                 << category("Java Application")
@@ -252,6 +260,8 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("spanId", T_LONG, "Span ID")
                 << field("spanName", T_LONG, "SpanName")
                 << field("contextId", T_LONG, "Context ID")
+                << field("traceIdHi", T_LONG, "Trace ID High")
+                << field("traceIdLo", T_LONG, "Trace ID Low")
                 << field("samples", T_INT, "Samples", F_UNSIGNED)
                 << field("timeSpan", T_LONG, "Time Span", F_DURATION_TICKS))
 
