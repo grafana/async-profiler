@@ -2,15 +2,17 @@
 
 async-profiler provides `jfrconv` utility to convert between different profile output formats.
 `jfrconv` can be found at the same location as the `asprof` binary. Converter is also available
-as a standalone Java application: [`jfr-converter.jar`](https://github.com/async-profiler/async-profiler/releases/download/v4.2.1/jfr-converter.jar).
+as a standalone Java application: [`jfr-converter.jar`](https://github.com/async-profiler/async-profiler/releases/latest/download/jfr-converter.jar).
 
 ## Supported conversions
 
-| Source    | html | collapsed | pprof | pb.gz | heatmap | otlp |
-| --------- | ---- | --------- | ----- | ----- | ------- | ---- |
-| jfr       | ✅   | ✅        | ✅    | ✅    | ✅      | ✅   |
-| html      | ✅   | ✅        | ❌    | ❌    | ❌      | ❌   |
-| collapsed | ✅   | ✅        | ❌    | ❌    | ❌      | ❌   |
+The tool can convert several source formats into various outputs. The conversion capabilities are summarized below:
+
+| Source format | to html | to collapsed | to pprof | to pb.gz | to heatmap | to otlp |
+| ------------- | ------- | ------------ | -------- | -------- | ---------- | ------- |
+| jfr           | ✅      | ✅           | ✅       | ✅       | ✅         | ✅      |
+| html          | ✅      | ✅           | ❌       | ❌       | ❌         | ❌      |
+| collapsed     | ✅      | ✅           | ❌       | ❌       | ❌         | ❌      |
 
 ## Usage
 
@@ -43,6 +45,8 @@ Conversion options:
 
   # otlp: OpenTelemetry profile format.
 
+Differential Flame Graph:
+  --diff <base-profile> <new-profile>
 
 JFR options:
     --cpu              Generate only CPU profile during conversion
@@ -120,7 +124,7 @@ jfrconv --cpu foo.jfr
 
 for HTML output as HTML is the default format for conversion from JFR.
 
-#### Flame Graph options
+### Flame Graph options
 
 To add a custom title to the generated Flame Graph, use `--title`, which has the default value `Flame Graph`:
 
@@ -128,9 +132,37 @@ To add a custom title to the generated Flame Graph, use `--title`, which has the
 jfrconv --cpu foo.jfr foo.html -r --title "Custom Title"
 ```
 
-### Other formats
+### Differential Flame Graph
 
-`jfrconv` supports converting a JFR file to `collapsed`, `pprof`, `pb.gz` and `heatmap` formats as well.
+To find performance regressions, it may be useful to compare current profile
+to a previous one that serves as a baseline. Differential Flame Graph
+visualizes such a comparsion with a special color scheme:
+
+- Red color denotes frames with more samples comparing to the baseline (i.e. regression);
+- Blue is for frames with less samples;
+- Yellow are new frames that were absent in the baseline.
+
+The more intense the color, the larger the delta.
+For each different frame, the delta value is displayed in a tooltip.
+
+![](/.assets/images/flamegraph_diff.png)
+
+Differential Flame Graph takes the shape of the current profile:
+all frames have exactly the same size as in the normal Flame Graph.
+This means, frames that exist only in the base profile will not be visible.
+To see such frames, create another differential Flame Graph,
+swapping the base and the current input file.
+
+To create differential Flame Graph, run `jfrconv --diff` with two input files:
+basline profile and new profile. Both files can be in JFR, HTML, or collapsed format.
+Other converter options work as usual.
+
+```
+jfrconv --cpu --diff baseline.jfr new.jfr diff.html
+```
+
+Output file name is optional. If omitted, `jfrconv` takes the name
+of the second input file, replacing its extension with `.diff.html`.
 
 ## Standalone converter examples
 

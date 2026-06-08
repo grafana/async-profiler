@@ -60,7 +60,7 @@ static jmethodID _stop_method;
 static jmethodID _box_method;
 static bool _jfr_starting = false;
 
-static const char* const SETTING_CSTACK[] = {NULL, "no", "fp", "dwarf", "lbr", "vm"};
+static const char* const SETTING_CSTACK[] = {NULL, "no", "fp", "dwarf", "vm"};
 
 
 struct CpuTime {
@@ -539,28 +539,22 @@ class Recording {
         return true;
     }
 
-    static const char* getFeaturesString(char* str, size_t size, StackWalkFeatures& f) {
-        snprintf(str, size, "%s %s %s %s %s %s %s %s %s %s %s %s %s",
-                 f.unknown_java  ? "unknown_java"  : "-",
-                 f.unwind_stub   ? "unwind_stub"   : "-",
-                 f.unwind_comp   ? "unwind_comp"   : "-",
-                 f.unwind_native ? "unwind_native" : "-",
-                 f.java_anchor   ? "java_anchor"   : "-",
-                 f.gc_traces     ? "gc_traces"     : "-",
-                 f.stats         ? "stats"         : "-",
-                 f.jnienv        ? "jnienv"        : "-",
-                 f.probe_sp      ? "probesp"       : "-",
-                 f.mixed         ? "mixed"         : "-",
-                 f.vtable_target ? "vtable"        : "-",
-                 f.comp_task     ? "comptask"      : "-",
-                 f.pc_addr       ? "pcaddr"        : "-");
-        return str;
+    static const char* getFeaturesString(char* str, size_t size, StackWalkFeatures f) {
+        int chars = snprintf(str, size, "%s%s%s%s%s%s%s",
+            f.stats         ? ",stats"    : "",
+            f.jnienv        ? ",jnienv"   : "",
+            f.agct          ? ",agct"     : "",
+            f.mixed         ? ",mixed"    : "",
+            f.vtable_target ? ",vtable"   : "",
+            f.comp_task     ? ",comptask" : "",
+            f.pc_addr       ? ",pcaddr"   : "");
+        return chars > 0 ? str + 1 : "";
     }
 
     void flush(Buffer* buf) {
         ssize_t result = write(_in_memory ? _memfd : _fd, buf->data(), buf->offset());
         if (result > 0) {
-            atomicInc(_bytes_written, result);
+            atomicInc(_bytes_written, (u64)result);
         }
         buf->reset();
     }
@@ -650,6 +644,7 @@ class Recording {
         writeIntSetting(buf, T_ACTIVE_RECORDING, "jfropts", args._jfr_options);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "chunksize", args._chunk_size);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "chunktime", args._chunk_time);
+        writeIntSetting(buf, T_ACTIVE_RECORDING, "memlimit", args._mem_limit);
 
         char str[256];
         writeStringSetting(buf, T_ACTIVE_RECORDING, "features", getFeaturesString(str, sizeof(str), args._features));
@@ -1385,7 +1380,7 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
         jclass cls = env->DefineClass(JFR_SYNC_NAME, NULL, (const jbyte*)JFR_SYNC_CLASS, INCBIN_SIZEOF(JFR_SYNC_CLASS));
         if (cls == NULL || env->RegisterNatives(cls, &native_method, 1) != 0
                 || (_start_method = env->GetStaticMethodID(cls, "start", "(Ljava/lang/String;Ljava/lang/String;I)V")) == NULL
-                || (_stop_method = env->GetStaticMethodID(cls, "stop", "()V")) == NULL
+                || (_stop_method = env->GetStaticMethodID(cls, "stop", "()Z")) == NULL
                 || (_box_method = env->GetStaticMethodID(cls, "box", "(I)Ljava/lang/Integer;")) == NULL
                 || (_jfr_sync_class = (jclass)env->NewGlobalRef(cls)) == NULL) {
             env->ExceptionDescribe();
@@ -1421,9 +1416,9 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
     int event_mask = args.eventMask() |
                      ((args._jfr_options ^ JFR_SYNC_OPTS) << EVENT_MASK_SIZE);
 
-    __atomic_store_n(&_jfr_starting, true, __ATOMIC_RELEASE);
+    storeRelease(_jfr_starting, true);
     env->CallStaticVoidMethod(_jfr_sync_class, _start_method, jfilename, jsettings, event_mask);
-    __atomic_store_n(&_jfr_starting, false, __ATOMIC_RELEASE);
+    storeRelease(_jfr_starting, false);
 
     if (env->ExceptionCheck()) {
         env->ExceptionDescribe();
@@ -1435,7 +1430,9 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
 
 void FlightRecorder::stopMasterRecording() {
     JNIEnv* env = VM::jni();
-    env->CallStaticVoidMethod(_jfr_sync_class, _stop_method);
+    if (env->CallStaticBooleanMethod(_jfr_sync_class, _stop_method) == JNI_FALSE) {
+        Log::warn("Failed to stop JFR recording");
+    }
     env->ExceptionClear();
 }
 
@@ -1514,5 +1511,5 @@ void FlightRecorder::recordLog(LogLevel level, const char* message, size_t len) 
 }
 
 bool FlightRecorder::isJfrStarting() {
-    return __atomic_load_n(&_jfr_starting, __ATOMIC_ACQUIRE);
+    return loadAcquire(_jfr_starting);
 }

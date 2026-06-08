@@ -113,10 +113,6 @@ static inline int hasNativeStack(EventType event_type) {
     return (1 << event_type) & events_with_native_stack;
 }
 
-static inline bool isVTableStub(const char* name) {
-    return name[0] && strcmp(name + 1, "table stub") == 0;
-}
-
 static inline int makeFrame(ASGCT_CallFrame* frames, jint type, jmethodID id) {
     frames[0].bci = type;
     frames[0].method_id = id;
@@ -137,14 +133,15 @@ void Profiler::addJavaMethod(const void* address, int length, jmethodID method) 
 }
 
 void Profiler::addRuntimeStub(const void* address, int length, const char* name) {
+    if (startsWith(name, "Stub Generator ")) {
+        name += 15;  // useless prefix introduced with JDK-8336658
+    } else if (streq(name, "Interpreter")) {
+        CodeHeap::setInterpreterStart(address);
+    }
+
     _stubs_lock.lock();
     _runtime_stubs.add(address, length, name, true);
     _stubs_lock.unlock();
-
-    if (strcmp(name, "call_stub") == 0) {
-        _call_stub_begin = address;
-        _call_stub_end = (const char*)address + length;
-    }
 
     CodeHeap::updateBounds(address, (const char*)address + length);
 }
@@ -309,38 +306,19 @@ CodeBlob* Profiler::findRuntimeStub(const void* address) {
     return _runtime_stubs.findBlobByAddress(address);
 }
 
-bool Profiler::isAddressInCode(const void* pc) {
-    if (CodeHeap::contains(pc)) {
-        return CodeHeap::findNMethod(pc) != NULL && !(pc >= _call_stub_begin && pc < _call_stub_end);
-    } else {
-        return findLibraryByAddress(pc) != NULL;
-    }
-}
-
-jmethodID Profiler::getCurrentCompileTask() {
-    VMThread* vm_thread = VMThread::current();
-    if (vm_thread != NULL) {
-        VMMethod* method = vm_thread->compiledMethod();
-        if (method != NULL) {
-            return method->id();
-        }
-    }
-    return NULL;
-}
-
-int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, StackContext* java_ctx) {
+int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, u64* cpu) {
     const void* callchain[MAX_NATIVE_FRAMES];
     int native_frames;
 
     // Use PerfEvents stack walker for execution samples, or basic stack walker for other events
     if (event_type == PERF_SAMPLE) {
-        native_frames = PerfEvents::walk(tid, ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
+        native_frames = PerfEvents::walk(tid, ucontext, callchain, MAX_NATIVE_FRAMES, cpu);
     } else if (_cstack == CSTACK_VM) {
         return 0;
     } else if (_cstack == CSTACK_DWARF) {
-        native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
+        native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES);
     } else {
-        native_frames = StackWalker::walkFP(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
+        native_frames = StackWalker::walkFP(ucontext, callchain, MAX_NATIVE_FRAMES);
     }
 
     return convertNativeTrace(native_frames, callchain, frames, event_type);
@@ -348,7 +326,6 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
 
 int Profiler::convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type) {
     int depth = 0;
-    jmethodID prev_method = NULL;
 
     for (int i = 0; i < native_frames; i++) {
         const char* current_method_name = findNativeMethod(callchain[i]);
@@ -365,32 +342,18 @@ int Profiler::convertNativeTrace(int native_frames, const void** callchain, ASGC
                 // This is C++ interpreter frame, this and later frames should be reported
                 // as Java frames returned by AGCT. Terminate the scan here.
                 return depth;
-            } else if (mark == MARK_COMPILER_ENTRY && _features.comp_task) {
-                // Insert current compile task as a pseudo Java frame
-                jmethodID compile_task = getCurrentCompileTask();
-                if (compile_task != NULL) {
-                    frames[depth].bci = 0;
-                    frames[depth].method_id = compile_task;
-                    depth++;
-                }
             }
         }
 
-        jmethodID current_method = (jmethodID)current_method_name;
-        if (current_method == prev_method && _cstack == CSTACK_LBR) {
-            // Skip duplicates in LBR stack, where branch_stack[N].from == branch_stack[N+1].to
-            prev_method = NULL;
-        } else {
-            frames[depth].bci = BCI_NATIVE_FRAME;
-            frames[depth].method_id = prev_method = current_method;
-            depth++;
-        }
+        frames[depth].bci = BCI_NATIVE_FRAME;
+        frames[depth].method_id = (jmethodID)current_method_name;
+        depth++;
     }
 
     return depth;
 }
 
-int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth, StackContext* java_ctx) {
+int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth) {
     // Workaround for JDK-8132510: it's not safe to call GetEnv() inside a signal handler
     // since JDK 9, so we do it only for threads already registered in ThreadLocalStorage
     VMThread* vm_thread = VMThread::current();
@@ -409,144 +372,12 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
         return 0;
     }
 
-    StackFrame frame(ucontext);
-    uintptr_t saved_pc, saved_sp, saved_fp;
-    if (ucontext != NULL) {
-        saved_pc = frame.pc();
-        saved_sp = frame.sp();
-        saved_fp = frame.fp();
-    }
-
-    if (_features.unwind_native && vm_thread->inJava()) {
-        if (saved_pc >= (uintptr_t)_call_stub_begin && saved_pc < (uintptr_t)_call_stub_end) {
-            // call_stub is unsafe to walk
-            frames->bci = BCI_ERROR;
-            frames->method_id = (jmethodID)"call_stub";
-            return 1;
-        }
-        if (DWARF_SUPPORTED && java_ctx->sp != 0) {
-            // If a thread is in Java state, unwind manually to the last known Java frame,
-            // since JVM does not always correctly unwind native frames
-            frame.restore((uintptr_t)java_ctx->pc, java_ctx->sp, java_ctx->fp);
-        }
-    }
-
     JitWriteProtection jit(false);
     ASGCT_CallTrace trace = {jni, 0, frames};
     VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
 
     if (trace.num_frames > 0) {
-        frame.restore(saved_pc, saved_sp, saved_fp);
         return trace.num_frames;
-    }
-
-    if ((trace.num_frames == ticks_unknown_Java || trace.num_frames == ticks_not_walkable_Java) && _features.unknown_java && ucontext != NULL) {
-        CodeBlob* stub = NULL;
-        _stubs_lock.lockShared();
-        if (_runtime_stubs.contains((const void*)frame.pc())) {
-            stub = findRuntimeStub((const void*)frame.pc());
-        }
-        _stubs_lock.unlockShared();
-
-        if (stub != NULL) {
-            if (_cstack != CSTACK_NO) {
-                if (_features.vtable_target && isVTableStub(stub->_name)) {
-                    uintptr_t receiver = frame.jarg0();
-                    if (receiver != 0) {
-                        VMSymbol* symbol = VMKlass::fromOop(receiver)->name();
-                        u32 class_id = classMap()->lookup(symbol->body(), symbol->length());
-                        max_depth -= makeFrame(trace.frames++, BCI_ALLOC, class_id);
-                    }
-                }
-                max_depth -= makeFrame(trace.frames++, BCI_NATIVE_FRAME, stub->_name);
-            }
-            if (_features.unwind_stub && frame.unwindStub((instruction_t*)stub->_start, stub->_name)
-                    && isAddressInCode((const void*)frame.pc())) {
-                java_ctx->pc = (const void*)frame.pc();
-                VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
-            }
-        } else if (VMStructs::hasMethodStructs()) {
-            NMethod* nmethod = CodeHeap::findNMethod((const void*)frame.pc());
-            if (nmethod != NULL && nmethod->isNMethod() && nmethod->isAlive()) {
-                VMMethod* method = nmethod->method();
-                if (method != NULL) {
-                    jmethodID method_id = method->id();
-                    if (method_id != NULL) {
-                        max_depth -= makeFrame(trace.frames++, 0, method_id);
-                    }
-                    if (_features.unwind_comp && frame.unwindCompiled(nmethod)
-                            && isAddressInCode((const void*)frame.pc())) {
-                        VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
-                    }
-                    if (_features.probe_sp && trace.num_frames < 0) {
-                        if (method_id != NULL) {
-                            trace.frames--;
-                        }
-                        for (int i = 0; trace.num_frames < 0 && i < PROBE_SP_LIMIT; i++) {
-                            frame.sp() += sizeof(void*);
-                            VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
-                        }
-                    }
-                }
-            } else if (nmethod != NULL) {
-                if (_cstack != CSTACK_NO) {
-                    max_depth -= makeFrame(trace.frames++, BCI_NATIVE_FRAME, nmethod->name());
-                }
-                if (_features.unwind_stub && frame.unwindStub(NULL, nmethod->name())
-                        && isAddressInCode((const void*)frame.pc())) {
-                    VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
-                }
-            }
-        }
-    } else if (trace.num_frames == ticks_unknown_not_Java && _features.java_anchor) {
-        JavaFrameAnchor* anchor = vm_thread->anchor();
-        uintptr_t sp = anchor->lastJavaSP();
-        const void* pc = anchor->lastJavaPC();
-        if (sp != 0 && pc == NULL) {
-            // We have the last Java frame anchor, but it is not marked as walkable.
-            // Make it walkable here
-            pc = ((const void**)sp)[-1];
-            anchor->setLastJavaPC(pc);
-
-            NMethod* m = CodeHeap::findNMethod(pc);
-            if (m != NULL) {
-                // AGCT fails if the last Java frame is a Runtime Stub with an invalid _frame_complete_offset.
-                // In this case we patch _frame_complete_offset manually
-                if (!m->isNMethod() && m->frameSize() > 0 && m->frameCompleteOffset() == -1) {
-                    m->setFrameCompleteOffset(0);
-                }
-                VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
-            } else if (findLibraryByAddress(pc) != NULL) {
-                VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
-            }
-
-            anchor->setLastJavaPC(NULL);
-        }
-    } else if (trace.num_frames == ticks_not_walkable_not_Java && _features.java_anchor) {
-        JavaFrameAnchor* anchor = vm_thread->anchor();
-        uintptr_t sp = anchor->lastJavaSP();
-        const void* pc = anchor->lastJavaPC();
-        if (sp != 0 && pc != NULL) {
-            // Similar to the above: last Java frame is set,
-            // but points to a Runtime Stub with an invalid _frame_complete_offset
-            NMethod* m = CodeHeap::findNMethod(pc);
-            if (m != NULL && !m->isNMethod() && m->frameSize() > 0 && m->frameCompleteOffset() == -1) {
-                m->setFrameCompleteOffset(0);
-                VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
-            }
-        }
-    } else if (trace.num_frames == ticks_GC_active && _features.gc_traces) {
-        if (vm_thread->anchor()->lastJavaSP() == 0) {
-            // Do not add 'GC_active' for threads with no Java frames, e.g. Compiler threads
-            frame.restore(saved_pc, saved_sp, saved_fp);
-            return 0;
-        }
-    }
-
-    frame.restore(saved_pc, saved_sp, saved_fp);
-
-    if (trace.num_frames > 0) {
-        return trace.num_frames + (trace.frames - frames);
     }
 
     const char* err_string = asgctError(trace.num_frames);
@@ -556,9 +387,7 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
     }
 
     atomicInc(_failures[-trace.num_frames]);
-    trace.frames->bci = BCI_ERROR;
-    trace.frames->method_id = (jmethodID)err_string;
-    return trace.frames - frames + 1;
+    return makeFrame(frames, BCI_ERROR, err_string);
 }
 
 int Profiler::getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int start_depth, int max_depth) {
@@ -574,49 +403,6 @@ int Profiler::getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* f
         }
     }
     return num_frames;
-}
-
-void Profiler::fillFrameTypes(ASGCT_CallFrame* frames, int num_frames, NMethod* nmethod) {
-    if (nmethod->isNMethod() && nmethod->isAlive()) {
-        VMMethod* method = nmethod->method();
-        if (method == NULL) {
-            return;
-        }
-
-        jmethodID current_method_id = method->id();
-        if (current_method_id == NULL) {
-            return;
-        }
-
-        // If the top frame is a runtime stub, skip it
-        if (num_frames > 0 && frames[0].bci == BCI_NATIVE_FRAME) {
-            frames++;
-            num_frames--;
-        }
-
-        // Mark current_method as COMPILED and frames above current_method as INLINED
-        for (int i = 0; i < num_frames; i++) {
-            if (frames[i].method_id == NULL || frames[i].bci <= BCI_NATIVE_FRAME) {
-                break;
-            }
-            if (frames[i].method_id == current_method_id) {
-                int level = nmethod->level();
-                frames[i].bci = FrameType::encode(level >= 1 && level <= 3 ? FRAME_C1_COMPILED : FRAME_JIT_COMPILED, frames[i].bci);
-                for (int j = 0; j < i; j++) {
-                    frames[j].bci = FrameType::encode(FRAME_INLINED, frames[j].bci);
-                }
-                break;
-            }
-        }
-    } else if (nmethod->isInterpreter()) {
-        // Mark the first Java frame as INTERPRETED
-        for (int i = 0; i < num_frames; i++) {
-            if (frames[i].bci > BCI_NATIVE_FRAME) {
-                frames[i].bci = FrameType::encode(FRAME_INTERPRETED, frames[i].bci);
-                break;
-            }
-        }
-    }
 }
 
 u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Event* event) {
@@ -653,13 +439,13 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         }
     }
 
-    StackContext java_ctx = {0};
+    u64 cpu = 0;
     if (hasNativeStack(event_type)) {
         if (_features.pc_addr && event_type <= WALL_CLOCK_SAMPLE) {
             num_frames += makeFrame(frames + num_frames, BCI_ADDRESS, StackFrame(ucontext).pc());
         }
         if (_cstack != CSTACK_NO) {
-            num_frames += getNativeTrace(ucontext, frames + num_frames, event_type, tid, &java_ctx);
+            num_frames += getNativeTrace(ucontext, frames + num_frames, event_type, tid, &cpu);
         }
     }
 
@@ -669,21 +455,14 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         if (_cstack == CSTACK_VM) {
             num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, lock_index, _features, event_type);
         } else {
-            int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
-            if (java_frames > 0 && java_ctx.pc != NULL && VMStructs::hasMethodStructs()) {
-                NMethod* nmethod = CodeHeap::findNMethod(java_ctx.pc);
-                if (nmethod != NULL) {
-                    fillFrameTypes(frames + num_frames, java_frames, nmethod);
-                }
-            }
-            num_frames += java_frames;
+            num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth);
         }
     } else if (event_type >= ALLOC_SAMPLE && event_type <= ALLOC_OUTSIDE_TLAB && _alloc_engine == &alloc_tracer) {
         if (VMStructs::hasStackStructs()) {
             StackWalkFeatures no_features{};
             num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, lock_index, no_features, event_type);
         } else {
-            num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
+            num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth);
         }
     } else {
         // Lock events and instrumentation events can safely call synchronous JVM TI stack walker.
@@ -694,6 +473,9 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
 
     if (num_frames == 0) {
         num_frames += makeFrame(frames + num_frames, BCI_ERROR, "no_Java_frame");
+    } else if (num_frames >= _max_stack_depth && _truncated_stack_depth < _max_stack_depth) {
+        num_frames = _truncated_stack_depth;
+        num_frames += makeFrame(frames + num_frames, BCI_ERROR, "truncated");
     }
 
     if (_add_thread_frame) {
@@ -703,7 +485,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         num_frames += makeFrame(frames + num_frames, BCI_ERROR, OS::schedPolicy(0));
     }
     if (_add_cpu_frame && event_type == PERF_SAMPLE) {
-        num_frames += makeFrame(frames + num_frames, BCI_CPU, java_ctx.cpu | 0x8000);
+        num_frames += makeFrame(frames + num_frames, BCI_CPU, cpu | 0x8000);
     }
 
     if (stack_walk_begin != 0) {
@@ -810,7 +592,7 @@ void* Profiler::dlopen_hook(const char* filename, int flags) {
 void Profiler::switchLibraryTrap(bool enable) {
     if (_dlopen_entry != NULL) {
         void* impl = enable ? (void*)dlopen_hook : (void*)dlopen;
-        __atomic_store_n(_dlopen_entry, impl, __ATOMIC_RELEASE);
+        storeRelease(*_dlopen_entry, impl);
     }
 }
 
@@ -883,11 +665,6 @@ void Profiler::crashHandler(int signo, siginfo_t* siginfo, void* ucontext) {
     uintptr_t pc = frame.pc();
     if (pc >= profiler_lib_start && pc < profiler_lib_end) {
         StackWalker::checkFault();
-    }
-
-    // Workaround for JDK-8313796. Setting cstack=dwarf also helps
-    if (VMStructs::isInterpretedFrameValidFunc((const void*)pc) && frame.skipFaultInstruction()) {
-        return;
     }
 
     if (WX_MEMORY && Trap::isFaultInstruction(pc)) {
@@ -982,11 +759,13 @@ void Profiler::updateNativeThreadNames() {
     }
 }
 
-Engine* Profiler::selectEngine(const char* event_name) {
+Engine* Profiler::selectEngine(Arguments& args) {
+    const char* event_name = args._event;
+
     if (event_name == NULL) {
         return &noop_engine;
     } else if (strcmp(event_name, EVENT_CPU) == 0) {
-        if (FdTransferClient::hasPeer() || PerfEvents::supported()) {
+        if (args._record_cpu || args._target_cpu != -1 || FdTransferClient::hasPeer() || PerfEvents::supported()) {
             return &perf_events;
         } else if (CTimer::supported()) {
             return &ctimer;
@@ -1010,8 +789,8 @@ Engine* Profiler::selectEngine(const char* event_name) {
     }
 }
 
-Engine* Profiler::selectAllocEngine(long alloc_interval, bool live) {
-    if (VM::addSampleObjectsCapability()) {
+Engine* Profiler::selectAllocEngine(bool tlab) {
+    if (!tlab && VM::addSampleObjectsCapability()) {
         return &object_sampler;
     } else if (VM::isOpenJ9()) {
         return &j9_object_sampler;
@@ -1121,7 +900,7 @@ Error Profiler::start(Arguments& args, bool reset) {
         lockAll();
         _class_map.clear();
         _thread_filter.clear();
-        _call_trace_storage.clear();
+        _call_trace_storage.clear(args._mem_limit);
         // Make sure frame structure is consistent throughout the entire recording
         _add_event_frame = args._output != OUTPUT_JFR;
         _add_thread_frame = args._threads && args._output != OUTPUT_JFR;
@@ -1149,12 +928,9 @@ Error Profiler::start(Arguments& args, bool reset) {
             }
         }
     }
+    _truncated_stack_depth = std::min(std::max(args._truncated_stack_depth, 0), _max_stack_depth);
 
     _features = args._features;
-    if (VM::hotspot_version() < 8) {
-        _features.java_anchor = 0;
-        _features.gc_traces = 0;
-    }
     if (!VMStructs::hasClassNames()) {
         _features.vtable_target = 0;
     }
@@ -1165,7 +941,7 @@ Error Profiler::start(Arguments& args, bool reset) {
     _update_thread_names = args._threads || args._output == OUTPUT_JFR;
     _thread_filter.init(args._filter);
 
-    _engine = selectEngine(args._event);
+    _engine = selectEngine(args);
     if (_engine == &wall_clock && args._wall >= 0) {
         return Error("Cannot start wall clock with the selected event");
     } else if (_engine != &perf_events && args._target_cpu != -1) {
@@ -1179,23 +955,21 @@ Error Profiler::start(Arguments& args, bool reset) {
     _cstack = args._cstack;
     if (_cstack == CSTACK_DWARF && !DWARF_SUPPORTED) {
         return Error("DWARF unwinding is not supported on this platform");
-    } else if (_cstack == CSTACK_LBR && _engine != &perf_events) {
-        return Error("Branch stack is supported only with PMU events");
     } else if (_cstack == CSTACK_VM && VM::loaded() && !VMStructs::hasStackStructs()) {
         return Error("VMStructs stack walking is not supported on this JVM/platform");
     }
 
-    if (_cstack == CSTACK_DEFAULT) {
-        if (VMStructs::hasStackStructs()) {
-            // Use VMStructs by default when possible
-            _cstack = args._cstack = CSTACK_VM;
-        } else if (VM::isOpenJ9() && DWARF_SUPPORTED) {
-            // OpenJ9 libs are compiled with frame pointers omitted
-            _cstack = args._cstack = CSTACK_DWARF;
-        }
+    if ((_cstack == CSTACK_DEFAULT || _cstack == CSTACK_DWARF) && VMStructs::hasStackStructs() && !_features.agct) {
+        // Use VMStructs by default when possible
+        _cstack = args._cstack = CSTACK_VM;
+    } else if (_cstack == CSTACK_DEFAULT && VM::isOpenJ9() && DWARF_SUPPORTED) {
+        // OpenJ9 libs are compiled with frame pointers omitted
+        _cstack = args._cstack = CSTACK_DWARF;
     }
 
-    if (_cstack != CSTACK_VM && _features.mixed) {
+    if (_cstack == CSTACK_VM && _features.agct) {
+        return Error("agct feature is incompatible with cstack=vm");
+    } else if (_cstack != CSTACK_VM && _features.mixed) {
         return Error("mixed feature is only allowed with VMStructs stack walking");
     }
 
@@ -1223,7 +997,7 @@ Error Profiler::start(Arguments& args, bool reset) {
     }
 
     if (_event_mask & EM_ALLOC) {
-        _alloc_engine = selectAllocEngine(args._alloc, args._live);
+        _alloc_engine = selectAllocEngine(args._tlab);
         error = _alloc_engine->start(args);
         if (error) {
             goto error2;
@@ -1396,11 +1170,6 @@ Error Profiler::stop(bool restart) {
     }
 
     _state = IDLE;
-    return Error::OK;
-}
-
-Error Profiler::check(Arguments& args) {
-    Log::warn("The 'check' command is deprecated and will be removed in the next release");
     return Error::OK;
 }
 
@@ -1697,7 +1466,7 @@ void Profiler::dumpText(Writer& out, Arguments& args) {
 
 void Profiler::dumpOtlp(Writer& out, Arguments& args) {
     FrameName fn(args, args._style & ~STYLE_ANNOTATE, _epoch, _thread_names_lock, _thread_names);
-    Otlp::Recorder recorder(_engine, fn, _start_time * 1000ULL, (OS::micros() - _start_time) * 1000ULL);
+    Otlp::Recorder recorder(activeEngine(), fn, _start_time * 1000ULL, (OS::micros() - _start_time) * 1000ULL);
     std::vector<CallTraceSample*> call_trace_samples;
     _call_trace_storage.collectSamples(call_trace_samples);
     recorder.record(call_trace_samples, args._counter == COUNTER_SAMPLES);
@@ -1857,14 +1626,6 @@ Error Profiler::runInternal(Arguments& args, Writer& out) {
             if (error) {
                 return error;
             }
-            break;
-        }
-        case ACTION_CHECK: {
-            Error error = check(args);
-            if (error) {
-                return error;
-            }
-            out << "OK\n";
             break;
         }
         case ACTION_STATUS: {

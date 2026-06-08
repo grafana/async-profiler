@@ -26,11 +26,11 @@ struct CallTraceSample {
     u64 counter;
 
     CallTrace* acquireTrace() {
-        return __atomic_load_n(&trace, __ATOMIC_ACQUIRE);
+        return loadAcquire(trace);
     }
 
     void setTrace(CallTrace* value) {
-        return __atomic_store_n(&trace, value, __ATOMIC_RELEASE);
+        storeRelease(trace, value);
     }
 
     CallTraceSample& operator+=(const CallTraceSample& s) {
@@ -47,6 +47,8 @@ class CallTraceStorage {
 
     LinearAllocator _allocator;
     LongHashTable* _current_table;
+    size_t _used_memory;
+    size_t _mem_limit;
     u64 _overflow;
 
     u64 calcHash(int num_frames, ASGCT_CallFrame* frames);
@@ -57,7 +59,7 @@ class CallTraceStorage {
     CallTraceStorage();
     ~CallTraceStorage();
 
-    void clear();
+    void clear(size_t mem_limit);
     u32 capacity();
     size_t usedMemory();
     u64 overflow() { return _overflow; }

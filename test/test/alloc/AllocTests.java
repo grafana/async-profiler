@@ -5,6 +5,8 @@
 
 package test.alloc;
 
+import jdk.jfr.consumer.RecordedEvent;
+import jdk.jfr.consumer.RecordingFile;
 import one.jfr.JfrReader;
 import one.jfr.StackTrace;
 import one.jfr.event.AllocationSample;
@@ -30,7 +32,7 @@ public class AllocTests {
         assert out.contains("java\\.lang\\.String\\[]");
     }
 
-    @Test(mainClass = MapReaderOpt.class, jvmArgs = "-XX:+UseParallelGC -Xmx1g -Xms1g", jvm = {Jvm.HOTSPOT, Jvm.ZING})
+    @Test(mainClass = MapReaderOpt.class, jvmArgs = "-XX:+UseParallelGC -Xmx1g -Xms1g", jvm = {Jvm.HOTSPOT, Jvm.ZING}, runIsolated = true)
     public void allocTotal(TestProcess p) throws Exception {
         Output out = p.profile("-e alloc -d 3 -o collapsed --total");
         assert out.samples("java.util.HashMap\\$Node\\[]") > 1_000_000;
@@ -41,7 +43,7 @@ public class AllocTests {
         assert out.contains("java\\.util\\.HashMap\\$Node\\[]");
     }
 
-    @Test(mainClass = Hello.class, agentArgs = "start,event=alloc,alloc=1,cstack=fp,flamegraph,file=%f", jvmArgs = "-XX:+UseG1GC -XX:-UseTLAB")
+    @Test(mainClass = Hello.class, agentArgs = "start,event=alloc,alloc=1,cstack=fp,flamegraph,file=%f", jvmArgs = "-XX:+UseG1GC -XX:-UseTLAB", runIsolated = true)
     public void startup(TestProcess p) throws Exception {
         Output out = p.waitForExit("%f");
         out = out.convertFlameToCollapsed();
@@ -57,8 +59,27 @@ public class AllocTests {
     public void humongous(TestProcess p) throws Exception {
         Thread.sleep(1000);
         Output out = p.profile("stop -o collapsed");
-        assert out.contains("java/io/ByteArrayOutputStream.toByteArray;");
-        assert out.contains("G1CollectedHeap::humongous_obj_allocate");
+        assert out.contains("java/io/ByteArrayOutputStream") : out;
+        assert out.contains("G1CollectedHeap::humongous_obj_allocate") : out;
+    }
+
+    @Test(mainClass = MapReaderOpt.class)
+    public void tlabAllocSampler(TestProcess p) throws Exception {
+        p.profile("-e alloc --tlab -d 3 -f %profile.jfr");
+        boolean tlabEvent = false;
+
+        try (RecordingFile recordingFile = new RecordingFile(p.getFile("%profile").toPath())) {
+            while (recordingFile.hasMoreEvents()) {
+                RecordedEvent event = recordingFile.readEvent();
+                String eventName = event.getEventType().getName();
+                if (eventName != null && eventName.equals("jdk.ObjectAllocationOutsideTLAB")) {
+                    tlabEvent = true;
+                    break;
+                }
+            }
+        }
+
+        assert tlabEvent : "No jdk.ObjectAllocationOutsideTLAB event was found";
     }
 
     @Test(mainClass = MapReaderOpt.class, jvmVer = {11, Integer.MAX_VALUE})

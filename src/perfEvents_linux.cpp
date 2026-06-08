@@ -58,6 +58,23 @@ enum {
     HW_BREAKPOINT_X  = 4
 };
 
+struct PerfCounter {
+    u64 value;
+    u64 time_enabled; /* PERF_FORMAT_TOTAL_TIME_ENABLED */
+    u64 time_running; /* PERF_FORMAT_TOTAL_TIME_RUNNING */
+};
+
+// Per-FD struct for storing perf-event multiplexing data
+struct MultiplexState {
+    u64 time_enabled; /* stores previous time_enabled */
+    u64 time_running; /* stores previous time_running */
+};
+
+static const unsigned int MAX_MULTIPLEXED_FD = 65536;
+
+static MultiplexState multiplex_state[MAX_MULTIPLEXED_FD];
+static bool multiplex_state_dirty = false;
+
 static int fetchInt(const char* file_name) {
     int fd = open(file_name, O_RDONLY);
     if (fd == -1) {
@@ -587,6 +604,9 @@ int PerfEvents::createForThread(int tid) {
     attr.disabled = 1;
     attr.wakeup_events = 1;
 
+    // flags for multiplexing support
+    attr.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
+
     if (_alluser) {
         attr.exclude_kernel = 1;
     }
@@ -598,16 +618,6 @@ int PerfEvents::createForThread(int tid) {
     if (_cstack >= CSTACK_FP) {
         attr.exclude_callchain_user = 1;
     }
-
-#ifdef PERF_ATTR_SIZE_VER5
-    if (_cstack == CSTACK_LBR) {
-        attr.sample_type |= PERF_SAMPLE_BRANCH_STACK | PERF_SAMPLE_REGS_USER;
-        attr.branch_sample_type = PERF_SAMPLE_BRANCH_USER | PERF_SAMPLE_BRANCH_CALL_STACK;
-        attr.sample_regs_user = 1ULL << PERF_REG_PC;
-    }
-#else
-#warning "Compiling without LBR support. Kernel headers 4.1+ required"
-#endif
 
     if (_record_cpu) {
         attr.sample_type |= PERF_SAMPLE_CPU;
@@ -647,6 +657,11 @@ int PerfEvents::createForThread(int tid) {
     _events[tid].reset();
     _events[tid]._fd = fd;
     _events[tid]._page = (struct perf_event_mmap_page*)page;
+
+    if (multiplex_state_dirty && fd < MAX_MULTIPLEXED_FD) {
+        multiplex_state[fd].time_enabled = 0;
+        multiplex_state[fd].time_running = 0;
+    }
 
     struct f_owner_ex ex;
     ex.type = F_OWNER_TID;
@@ -700,8 +715,36 @@ u64 PerfEvents::readCounter(siginfo_t* siginfo, void* ucontext) {
         case 3: return StackFrame(ucontext).arg2();
         case 4: return StackFrame(ucontext).arg3();
         default: {
-            u64 counter;
-            return read(siginfo->si_fd, &counter, sizeof(counter)) == sizeof(counter) ? counter : 1;
+            // Read counter with multiplexing metadata for accurate scaling
+            struct PerfCounter counter;
+            if (read(siginfo->si_fd, &counter, sizeof(counter)) == sizeof(counter)) {
+                u64 current_val = counter.value;
+                if (counter.time_enabled > counter.time_running) {
+                    int fd = siginfo->si_fd;
+                    if (fd < MAX_MULTIPLEXED_FD) {
+                        u64 delta_enabled = counter.time_enabled - multiplex_state[fd].time_enabled;
+                        u64 delta_running = counter.time_running - multiplex_state[fd].time_running;
+
+                        multiplex_state[fd].time_enabled = counter.time_enabled;
+                        multiplex_state[fd].time_running = counter.time_running;
+
+                        if (!multiplex_state_dirty) {
+                            multiplex_state_dirty = true;
+                        }
+
+                        if (delta_running > 0 && delta_enabled > delta_running) {
+                            // scaled counter = (counter) * (delta_enabled / delta_running)
+                            double ratio = (double)delta_enabled / delta_running;
+                            return (u64)(current_val * ratio);
+                        }
+                    } else if (counter.time_running > 0) {
+                        double ratio = (double)counter.time_enabled / counter.time_running;
+                        return (u64)(current_val * ratio);
+                    }
+                }
+                return current_val;
+            }
+            return 1;
         }
     }
 }
@@ -741,8 +784,8 @@ void PerfEvents::signalHandlerJ9(int signo, siginfo_t* siginfo, void* ucontext) 
     if (_enabled) {
         u64 counter = readCounter(siginfo, ucontext);
         J9StackTraceNotification notif;
-        StackContext java_ctx;
-        notif.num_frames = _cstack == CSTACK_NO ? 0 : walk(OS::threadId(), ucontext, notif.addr, MAX_J9_NATIVE_FRAMES, &java_ctx);
+        u64 cpu = 0;
+        notif.num_frames = _cstack == CSTACK_NO ? 0 : walk(OS::threadId(), ucontext, notif.addr, MAX_J9_NATIVE_FRAMES, &cpu);
         J9StackTraces::checkpoint(counter, &notif);
     } else {
         resetBuffer(OS::threadId());
@@ -799,7 +842,7 @@ Error PerfEvents::start(Arguments& args) {
         // Automatically switch on alluser for non-CPU events, if kernel profiling is unavailable
         _alluser = strcmp(args._event, EVENT_CPU) != 0 && !supported();
     }
-    _use_perf_mmap = _kernel_stack || _cstack == CSTACK_DEFAULT || _cstack == CSTACK_LBR || _record_cpu;
+    _use_perf_mmap = _kernel_stack || _cstack == CSTACK_DEFAULT || _record_cpu;
 
     if (strcmp(_event_type->name, "cpu-clock") == 0 && hasPerfEventRefreshBug()) {
         Log::debug("Enable workaround for PERF_EVENT_IOC_REFRESH bug");
@@ -853,7 +896,7 @@ void PerfEvents::stop() {
     J9StackTraces::stop();
 }
 
-int PerfEvents::walk(int tid, void* ucontext, const void** callchain, int max_depth, StackContext* java_ctx) {
+int PerfEvents::walk(int tid, void* ucontext, const void** callchain, int max_depth, u64* cpu) {
     PerfEvent* event = &_events[tid];
     if (!event->tryLock()) {
         return 0;  // the event is being destroyed
@@ -874,7 +917,7 @@ int PerfEvents::walk(int tid, void* ucontext, const void** callchain, int max_de
 
             if (hdr->type == PERF_RECORD_SAMPLE) {
                 if (_record_cpu) {
-                    java_ctx->cpu = ring.next();
+                    *cpu = ring.next();
                 }
 
                 u64 nr = ring.next();
@@ -884,40 +927,9 @@ int PerfEvents::walk(int tid, void* ucontext, const void** callchain, int max_de
                         const void* iptr = (const void*)ip;
                         if (CodeHeap::contains(iptr) || depth >= max_depth) {
                             // Stop at the first Java frame
-                            java_ctx->pc = iptr;
                             goto stack_complete;
                         }
                         callchain[depth++] = iptr;
-                    }
-                }
-
-                if (_cstack == CSTACK_LBR) {
-                    u64 bnr = ring.next();
-
-                    // Last userspace PC is stored right after branch stack
-                    const void* pc = (const void*)ring.peek(bnr * 3 + 2);
-                    if (CodeHeap::contains(pc) || depth >= max_depth) {
-                        java_ctx->pc = pc;
-                        goto stack_complete;
-                    }
-                    callchain[depth++] = pc;
-
-                    while (bnr-- > 0) {
-                        const void* from = (const void*)ring.next();
-                        const void* to = (const void*)ring.next();
-                        ring.next();
-
-                        if (CodeHeap::contains(to) || depth >= max_depth) {
-                            java_ctx->pc = to;
-                            goto stack_complete;
-                        }
-                        callchain[depth++] = to;
-
-                        if (CodeHeap::contains(from) || depth >= max_depth) {
-                            java_ctx->pc = from;
-                            goto stack_complete;
-                        }
-                        callchain[depth++] = from;
                     }
                 }
 
@@ -933,9 +945,9 @@ stack_complete:
     event->unlock();
 
     if (_cstack == CSTACK_FP) {
-        depth += StackWalker::walkFP(ucontext, callchain + depth, max_depth - depth, java_ctx);
+        depth += StackWalker::walkFP(ucontext, callchain + depth, max_depth - depth);
     } else if (_cstack == CSTACK_DWARF) {
-        depth += StackWalker::walkDwarf(ucontext, callchain + depth, max_depth - depth, java_ctx);
+        depth += StackWalker::walkDwarf(ucontext, callchain + depth, max_depth - depth);
     }
 
     return depth;

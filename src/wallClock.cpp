@@ -77,7 +77,7 @@ class ThreadCpuTimeBuffer {
     void reset() {
         memset(_ringbuf, 0, sizeof(_ringbuf));
         _read_ptr = 0;
-        __atomic_store_n(&_write_ptr, 0, __ATOMIC_RELEASE);
+        storeRelease(_write_ptr, 0);
     }
 
     void add(u64 trace, u64 span_id, u64 span_name, u64 context_id, u64 trace_id_hi, u64 trace_id_lo) {
