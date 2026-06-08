@@ -42,14 +42,14 @@ static int pthread_setspecific_hook(pthread_key_t key, const void* value) {
 }
 
 void CpuEngine::onThreadStart() {
-    CpuEngine* current = __atomic_load_n(&_current, __ATOMIC_ACQUIRE);
+    CpuEngine* current = loadAcquire(_current);
     if (current != NULL) {
         current->createForThread(OS::threadId());
     }
 }
 
 void CpuEngine::onThreadEnd() {
-    CpuEngine* current = __atomic_load_n(&_current, __ATOMIC_ACQUIRE);
+    CpuEngine* current = loadAcquire(_current);
     if (current != NULL) {
         current->destroyForThread(OS::threadId());
     }
@@ -80,12 +80,12 @@ bool CpuEngine::setupThreadHook() {
 
 void CpuEngine::enableThreadHook() {
     *_pthread_entry = (void*)pthread_setspecific_hook;
-    __atomic_store_n(&_current, this, __ATOMIC_RELEASE);
+    storeRelease(_current, this);
 }
 
 void CpuEngine::disableThreadHook() {
     *_pthread_entry = (void*)pthread_setspecific;
-    __atomic_store_n(&_current, NULL, __ATOMIC_RELEASE);
+    storeRelease(_current, nullptr);
 }
 
 bool CpuEngine::isResourceLimit(int err) {
@@ -124,9 +124,8 @@ void CpuEngine::signalHandlerJ9(int signo, siginfo_t* siginfo, void* ucontext) {
     if (!_enabled) return;
 
     J9StackTraceNotification notif;
-    StackContext java_ctx;
     notif.num_frames = _cstack == CSTACK_NO ? 0 : _cstack == CSTACK_DWARF
-        ? StackWalker::walkDwarf(ucontext, notif.addr, MAX_J9_NATIVE_FRAMES, &java_ctx)
-        : StackWalker::walkFP(ucontext, notif.addr, MAX_J9_NATIVE_FRAMES, &java_ctx);
+        ? StackWalker::walkDwarf(ucontext, notif.addr, MAX_J9_NATIVE_FRAMES)
+        : StackWalker::walkFP(ucontext, notif.addr, MAX_J9_NATIVE_FRAMES);
     J9StackTraces::checkpoint(_interval, &notif);
 }

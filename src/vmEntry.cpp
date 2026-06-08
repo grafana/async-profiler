@@ -25,6 +25,10 @@
 const int ARGUMENTS_ERROR = 100;
 const int COMMAND_ERROR = 200;
 
+static constexpr int JMETHOD_ID_LIMIT = 1024 * 1024 * 500 / 8; // 500 MiB memory, about 65 million methods
+static int _jmethod_id_count = 0;
+static bool _jmethod_id_count_warned = false;
+
 JavaVM* VM::_vm;
 jvmtiEnv* VM::_jvmti = NULL;
 
@@ -44,62 +48,62 @@ JVM_MemoryFunc VM::_totalMemory;
 JVM_MemoryFunc VM::_freeMemory;
 
 static bool isVmRuntimeEntry(const char* blob_name) {
-    return strcmp(blob_name, "_ZNK12MemAllocator8allocateEv") == 0
-        || strncmp(blob_name, "_Z22post_allocation_notify", 26) == 0
-        || strncmp(blob_name, "_ZN11OptoRuntime", 16) == 0
-        || strncmp(blob_name, "_ZN8Runtime1", 12) == 0
-        || strncmp(blob_name, "_ZN13SharedRuntime", 18) == 0
-        || strncmp(blob_name, "_ZN18InterpreterRuntime", 23) == 0;
+    return streq(blob_name, "_ZNK12MemAllocator8allocateEv")
+        || startsWith(blob_name, "_Z22post_allocation_notify")
+        || startsWith(blob_name, "_ZN11OptoRuntime")
+        || startsWith(blob_name, "_ZN8Runtime1")
+        || startsWith(blob_name, "_ZN13SharedRuntime")
+        || startsWith(blob_name, "_ZN18InterpreterRuntime");
 }
 
 static bool isZingRuntimeEntry(const char* blob_name) {
-    return strncmp(blob_name, "_ZN14DolphinRuntime", 19) == 0
-        || strncmp(blob_name, "_ZN37JvmtiSampledObjectAllocEventCollector", 42) == 0;
+    return startsWith(blob_name, "_ZN14DolphinRuntime")
+        || startsWith(blob_name, "_ZN37JvmtiSampledObjectAllocEventCollector");
 }
 
 static bool isZeroInterpreterMethod(const char* blob_name) {
-    return strncmp(blob_name, "_ZN15ZeroInterpreter", 20) == 0
-        || strncmp(blob_name, "_ZN19BytecodeInterpreter3run", 28) == 0;
+    return startsWith(blob_name, "_ZN15ZeroInterpreter")
+        || startsWith(blob_name, "_ZN19BytecodeInterpreter3run");
 }
 
 static bool isOpenJ9InterpreterMethod(const char* blob_name) {
-    return strncmp(blob_name, "_ZN32VM_BytecodeInterpreter", 27) == 0
-        || strncmp(blob_name, "_ZN26VM_BytecodeInterpreter", 27) == 0
-        || strncmp(blob_name, "bytecodeLoop", 12) == 0
-        || strcmp(blob_name, "cInterpreter") == 0;
+    return startsWith(blob_name, "_ZN32VM_BytecodeInterpreter")
+        || startsWith(blob_name, "_ZN26VM_BytecodeInterpreter")
+        || startsWith(blob_name, "bytecodeLoop")
+        || streq(blob_name, "cInterpreter");
 }
 
 static bool isOpenJ9JitStub(const char* blob_name) {
-    if (strncmp(blob_name, "jit", 3) == 0) {
+    if (startsWith(blob_name, "jit")) {
         blob_name += 3;
-        return strcmp(blob_name, "NewObject") == 0
-            || strcmp(blob_name, "NewArray") == 0
-            || strcmp(blob_name, "ANewArray") == 0
-            || strcmp(blob_name, "AMultiNewArray") == 0;
+        return streq(blob_name, "NewObject")
+            || streq(blob_name, "NewArray")
+            || streq(blob_name, "ANewArray")
+            || streq(blob_name, "AMultiNewArray");
     }
     return false;
 }
 
 static bool isOpenJ9Resolve(const char* blob_name) {
-    return strncmp(blob_name, "resolve", 7) == 0;
+    return startsWith(blob_name, "resolve");
 }
 
 static bool isOpenJ9JitAlloc(const char* blob_name) {
-    return strncmp(blob_name, "old_", 4) == 0;
+    return startsWith(blob_name, "old_");
 }
 
 static bool isOpenJ9GcAlloc(const char* blob_name) {
-    return strncmp(blob_name, "J9Allocate", 10) == 0;
+    return startsWith(blob_name, "J9Allocate");
 }
 
 static bool isOpenJ9JvmtiAlloc(const char* blob_name) {
-    return strcmp(blob_name, "jvmtiHookSampledObjectAlloc") == 0 ||
-           strcmp(blob_name, "jvmtiHookObjectAllocate") == 0;
+    return streq(blob_name, "jvmtiHookSampledObjectAlloc") ||
+           streq(blob_name, "jvmtiHookObjectAllocate");
 }
 
 static bool isCompilerEntry(const char* blob_name) {
-    return strncmp(blob_name, "_ZN8Compiler14compile_method", 28) == 0 ||
-           strncmp(blob_name, "_ZN10C2Compiler14compile_method", 31) == 0;
+    return startsWith(blob_name, "_ZN8Compiler14compile_method") ||
+           startsWith(blob_name, "_ZN10C2Compiler14compile_method");
 }
 
 static void* resolveMethodId(void** mid) {
@@ -364,7 +368,13 @@ void VM::applyPatch(char* func, const char* patch, const char* end_patch) {
     }
 }
 
-void VM::loadMethodIDs(jvmtiEnv* jvmti, JNIEnv* jni, jclass klass) {
+void VM::loadMethodIDs(jvmtiEnv* jvmti, JNIEnv* jni, jclass klass, bool update_count) {
+    if (loadAcquire(_jmethod_id_count) > JMETHOD_ID_LIMIT) {
+        if (__sync_bool_compare_and_swap(&_jmethod_id_count_warned, false, true)) {
+            Log::warn("Total number of generated jmethod-ids exceeds %d, stop generating more", JMETHOD_ID_LIMIT);
+        }
+        return;
+    }
     if (VMStructs::hasClassLoaderData()) {
         VMKlass* vmklass = VMKlass::fromJavaClass(jni, klass);
         int method_count = vmklass->methodCount();
@@ -383,6 +393,9 @@ void VM::loadMethodIDs(jvmtiEnv* jvmti, JNIEnv* jni, jclass klass) {
     jint method_count;
     jmethodID* methods;
     if (jvmti->GetClassMethods(klass, &method_count, &methods) == 0) {
+        if (update_count) {
+            atomicInc(_jmethod_id_count, method_count);
+        }
         jvmti->Deallocate((unsigned char*)methods);
     }
 }
@@ -433,7 +446,7 @@ jvmtiError VM::RedefineClassesHook(jvmtiEnv* jvmti, jint class_count, const jvmt
         JNIEnv* env = jni();
         for (int i = 0; i < class_count; i++) {
             if (class_definitions[i].klass != NULL) {
-                loadMethodIDs(jvmti, env, class_definitions[i].klass);
+                loadMethodIDs(jvmti, env, class_definitions[i].klass, false);
             }
         }
     }
@@ -449,7 +462,7 @@ jvmtiError VM::RetransformClassesHook(jvmtiEnv* jvmti, jint class_count, const j
         JNIEnv* env = jni();
         for (int i = 0; i < class_count; i++) {
             if (classes[i] != NULL) {
-                loadMethodIDs(jvmti, env, classes[i]);
+                loadMethodIDs(jvmti, env, classes[i], false);
             }
         }
     }

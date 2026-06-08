@@ -37,84 +37,7 @@ const size_t EXTRA_BUF_SIZE = 512;
 
 
 // Parses agent arguments.
-// The format of the string is:
-//     arg[,arg...]
-// where arg is one of the following options:
-//     start                   - start profiling
-//     resume                  - start or resume profiling without resetting collected data
-//     stop                    - stop profiling
-//     dump                    - dump collected data without stopping profiling session
-//     status                  - print profiling status (inactive / running for X seconds)
-//     metrics                 - print profiler metrics in Prometheus format
-//     list                    - show the list of available profiling events
-//     version                 - display the agent version
-//     event=EVENT             - which event to trace (cpu, wall, cache-misses, etc.)
-//     alloc[=BYTES]           - profile allocations with BYTES interval
-//     live                    - build allocation profile from live objects only
-//     nativemem[=BYTES]       - profile native allocations with BYTES interval
-//     nofree                  - do not collect free calls in native allocation profiling
-//     trace=METHOD[:DURATION] - method to be traced with optional latency threshold
-//     lock[=DURATION]         - profile contended locks overflowing the DURATION bucket (default: 10us)
-//     nativelock[=DURATION]   - profile contended pthread locks overflowing the DURATION bucket (default: 10us)
-//     wall[=NS]               - run wall clock profiling together with CPU profiling
-//     nobatch                 - legacy wall clock sampling without batch events
-//     proc[=S]                - collect process stats (default: 30s)
-//     collapsed               - dump collapsed stacks (the format used by FlameGraph script)
-//     flamegraph              - produce Flame Graph in HTML format
-//     tree                    - produce call tree in HTML format
-//     jfr                     - dump events in Java Flight Recorder format
-//     jfropts=OPTIONS         - JFR recording options: numeric bitmask or 'mem'
-//     jfrsync[=CONFIG]        - start Java Flight Recording with the given config along with the profiler
-//     traces[=N]              - dump top N call traces
-//     flat[=N]                - dump top N methods (aka flat profile)
-//     otlp                    - dump in OpenTelemetry format
-//     samples                 - count the number of samples (default)
-//     total                   - count the total value (time, bytes, etc.) instead of samples
-//     chunksize=N             - approximate size of JFR chunk in bytes (default: 100 MB)
-//     chunktime=N             - duration of JFR chunk in seconds (default: 1 hour)
-//     timeout=TIME            - automatically stop profiler at TIME (absolute or relative)
-//     loop=TIME               - run profiler in a loop (continuous profiling)
-//     interval=N              - sampling interval in ns (default: 10'000'000, i.e. 10 ms)
-//     jstackdepth=N           - maximum Java stack depth (default: 2048)
-//     signal=N                - use alternative signal for cpu or wall clock profiling
-//     features=LIST           - advanced stack trace features (mixed, vtable, comptask, pcaddr)"
-//     safemode=BITS           - disable stack recovery techniques (default: 0, i.e. everything enabled)
-//     file=FILENAME           - output file name for dumping
-//     log=FILENAME            - log warnings and errors to the given dedicated stream
-//     loglevel=LEVEL          - logging level: TRACE, DEBUG, INFO, WARN, ERROR, or NONE
-//     quiet                   - do not log "Profiling started/stopped" message
-//     server=ADDRESS          - start insecure HTTP server at ADDRESS/PORT
-//     filter=FILTER           - thread filter
-//     threads                 - profile different threads separately
-//     sched                   - group threads by scheduling policy
-//     cstack=MODE             - how to collect C stack frames in addition to Java stack
-//                               MODE is 'fp', 'dwarf', 'lbr', 'vm' or 'no'
-//     clock=SOURCE            - clock source for JFR timestamps: 'tsc' or 'monotonic'
-//     alluser                 - include only user-mode events
-//     fdtransfer              - use fdtransfer to pass fds to the profiler
-//     target-cpu=CPU          - sample threads on a specific CPU (perf_events only, default: -1)
-//     record-cpu              - record which cpu a sample was taken on
-//     simple                  - simple class names instead of FQN
-//     dot                     - dotted class names
-//     norm                    - normalize names of hidden classes / lambdas
-//     sig                     - print method signatures
-//     ann                     - annotate Java methods
-//     lib                     - prepend library names
-//     mcache                  - max age of jmethodID cache (default: 0 = disabled)
-//     include=PATTERN         - include stack traces containing PATTERN
-//     exclude=PATTERN         - exclude stack traces containing PATTERN
-//     begin=FUNCTION          - begin profiling when FUNCTION is executed
-//     end=FUNCTION            - end profiling when FUNCTION is executed
-//     nostop                  - do not stop profiling outside --begin/--end window
-//     ttsp                    - only time-to-safepoint profiling
-//     title=TITLE             - FlameGraph title
-//     minwidth=PCT            - FlameGraph minimum frame width in percent
-//     reverse                 - generate stack-reversed FlameGraph / Call tree (defaults to icicle graph)
-//     inverted                - toggles the layout for reversed stacktraces from icicle to flamegraph
-//                               and for default stacktraces from flamegraph to icicle
-//
-// It is possible to specify multiple dump options at the same time
-
+// The format of the string is: arg[,arg...]
 Error Arguments::parse(const char* args) {
     if (args == NULL) {
         return Error::OK;
@@ -147,9 +70,6 @@ Error Arguments::parse(const char* args) {
 
             CASE("dump")
                 _action = ACTION_DUMP;
-
-            CASE("check")
-                _action = ACTION_CHECK;
 
             CASE("status")
                 _action = ACTION_STATUS;
@@ -246,8 +166,14 @@ Error Arguments::parse(const char* args) {
                     msg = "Invalid loop duration";
                 }
 
+            CASE("memlimit")
+                _mem_limit = value == NULL ? 0 : parseUnits(value, BYTES);
+
             CASE("alloc")
                 _alloc = value == NULL ? 0 : parseUnits(value, BYTES);
+
+            CASE("tlab")
+                _tlab = true;
 
             CASE("nativemem")
                 _nativemem = value == NULL ? 0 : parseUnits(value, BYTES);
@@ -312,6 +238,9 @@ Error Arguments::parse(const char* args) {
             CASE("jstackdepth")
                 if (value == NULL || (_jstackdepth = atoi(value)) <= 0) {
                     msg = "jstackdepth must be > 0";
+                } else {
+                    char* slash = strchr(value, '/');
+                    _truncated_stack_depth = slash != NULL ? atoi(slash + 1) : _jstackdepth;
                 }
 
             CASE("signal")
@@ -326,23 +255,12 @@ Error Arguments::parse(const char* args) {
                 if (value != NULL) {
                     if (strstr(value, "stats"))    _features.stats = 1;
                     if (strstr(value, "jnienv"))   _features.jnienv = 1;
-                    if (strstr(value, "probesp"))  _features.probe_sp = 1;
+                    if (strstr(value, "agct"))     _features.agct = 1;
                     if (strstr(value, "mixed"))    _features.mixed = 1;
                     if (strstr(value, "vtable"))   _features.vtable_target = 1;
                     if (strstr(value, "comptask")) _features.comp_task = 1;
                     if (strstr(value, "pcaddr"))   _features.pc_addr = 1;
                 }
-
-            CASE("safemode") {
-                // Left for compatibility purpose; will be eventually migrated to 'features'
-                int bits = value == NULL ? INT_MAX : (int)strtol(value, NULL, 0);
-                _features.unknown_java  = (bits & 1) ? 0 : 1;
-                _features.unwind_stub   = (bits & 2) ? 0 : 1;
-                _features.unwind_comp   = (bits & 4) ? 0 : 1;
-                _features.unwind_native = (bits & 8) ? 0 : 1;
-                _features.java_anchor   = (bits & 16) ? 0 : 1;
-                _features.gc_traces     = (bits & 32) ? 0 : 1;
-            }
 
             CASE("file")
                 if (value == NULL || value[0] == 0) {
@@ -409,8 +327,6 @@ Error Arguments::parse(const char* args) {
                         _cstack = CSTACK_FP;
                     } else if (strcmp(value, "dwarf") == 0) {
                         _cstack = CSTACK_DWARF;
-                    } else if (strcmp(value, "lbr") == 0) {
-                        _cstack = CSTACK_LBR;
                     } else if (strcmp(value, "vm") == 0) {
                         _cstack = CSTACK_VM;
                     } else if (strcmp(value, "vmx") == 0) {

@@ -1,4 +1,4 @@
-PROFILER_VERSION ?= 4.3.0.1
+PROFILER_VERSION ?= 4.4.0.0
 
 ifeq ($(COMMIT_TAG),true)
   PROFILER_VERSION := $(PROFILER_VERSION)-$(shell git rev-parse --short=8 HEAD)
@@ -62,7 +62,8 @@ LOG_DIR=build/test/logs
 LOG_LEVEL=
 SKIP=
 RETRY_COUNT=0
-TEST_FLAGS=-DlogDir=$(LOG_DIR) -DlogLevel=$(LOG_LEVEL) -Dskip='$(subst $(COMMA), ,$(SKIP))' -DretryCount=$(RETRY_COUNT)
+TEST_THREADS ?= 8
+TEST_FLAGS=-DlogDir=$(LOG_DIR) -DlogLevel=$(LOG_LEVEL) -Dskip='$(subst $(COMMA), ,$(SKIP))' -DretryCount=$(RETRY_COUNT) -DthreadCount=$(TEST_THREADS)
 
 # always sort SOURCES so zInit is last.
 SOURCES := $(sort $(wildcard src/*.cpp))
@@ -99,7 +100,8 @@ ifeq ($(OS),Darwin)
     MERGE=false
   endif
 else
-  CXXFLAGS += -U_FORTIFY_SOURCE -Wl,-z,defs -Wl,--exclude-libs,ALL -static-libstdc++ -static-libgcc -fdata-sections -ffunction-sections -Wl,--gc-sections -ggdb -Wunused-variable
+  CXXFLAGS += -U_FORTIFY_SOURCE -Wl,-z,defs -Wl,--exclude-libs,ALL -static-libstdc++ -static-libgcc
+  CXXFLAGS += -fdata-sections -ffunction-sections -Wl,--gc-sections -ggdb -Wunused-variable -Wno-psabi
   ifeq ($(MERGE),true)
     CXXFLAGS += -fwhole-program
   endif
@@ -206,7 +208,7 @@ build/$(API_JAR): $(API_SOURCES) $(JAR_MANIFEST)
 build/$(CONVERTER_JAR): $(CONVERTER_SOURCES) $(RESOURCES)
 	mkdir -p build/converter
 	$(JAVAC) $(JAVAC_OPTIONS) -d build/converter $(CONVERTER_SOURCES)
-	$(JAR) cfe $@ Main -C build/converter . -C src/res .
+	$(JAR) cfe $@ one.convert.Main -C build/converter . -C src/res .
 	$(RM) -r build/converter
 
 %.class: %.java

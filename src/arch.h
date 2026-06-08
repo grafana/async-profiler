@@ -27,26 +27,25 @@ typedef unsigned short u16;
 typedef unsigned int u32;
 typedef unsigned long long u64;
 
-static inline u64 atomicInc(volatile u64& var, u64 increment = 1) {
-    return __sync_fetch_and_add(&var, increment);
+template<typename T>
+static inline T atomicInc(T& var, T increment = 1) {
+    return __atomic_fetch_add(&var, increment, __ATOMIC_ACQ_REL);
 }
 
-static inline int atomicInc(volatile u32& var, int increment = 1) {
-    return __sync_fetch_and_add(&var, increment);
+template<typename T>
+static inline T atomicDec(T& var, T decrement = 1) {
+    return __atomic_fetch_sub(&var, decrement, __ATOMIC_ACQ_REL);
 }
 
-static inline int atomicInc(volatile int& var, int increment = 1) {
-    return __sync_fetch_and_add(&var, increment);
-}
-
-static inline u64 loadAcquire(u64& var) {
+template<typename T>
+static inline T loadAcquire(T& var) {
     return __atomic_load_n(&var, __ATOMIC_ACQUIRE);
 }
 
-static inline void storeRelease(u64& var, u64 value) {
-    return __atomic_store_n(&var, value, __ATOMIC_RELEASE);
+template<typename T, typename U>
+static inline void storeRelease(T& var, U value) {
+    __atomic_store_n(&var, static_cast<T>(value), __ATOMIC_RELEASE);
 }
-
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -56,7 +55,6 @@ const int BREAKPOINT_OFFSET = 0;
 
 const int SYSCALL_SIZE = 2;
 const int FRAME_PC_SLOT = 1;
-const int PROBE_SP_LIMIT = 4;
 const int PLT_HEADER_SIZE = 16;
 const int PLT_ENTRY_SIZE = 16;
 const int PERF_REG_PC = 8;  // PERF_REG_X86_IP
@@ -78,7 +76,6 @@ const int BREAKPOINT_OFFSET = 0;
 
 const int SYSCALL_SIZE = sizeof(instruction_t);
 const int FRAME_PC_SLOT = 1;
-const int PROBE_SP_LIMIT = 0;
 const int PLT_HEADER_SIZE = 20;
 const int PLT_ENTRY_SIZE = 12;
 const int PERF_REG_PC = 15;  // PERF_REG_ARM_PC
@@ -99,7 +96,6 @@ const int BREAKPOINT_OFFSET = 0;
 
 const int SYSCALL_SIZE = sizeof(instruction_t);
 const int FRAME_PC_SLOT = 1;
-const int PROBE_SP_LIMIT = 0;
 const int PLT_HEADER_SIZE = 32;
 const int PLT_ENTRY_SIZE = 16;
 const int PERF_REG_PC = 32;  // PERF_REG_ARM64_PC
@@ -122,7 +118,6 @@ const int BREAKPOINT_OFFSET = 8;
 
 const int SYSCALL_SIZE = sizeof(instruction_t);
 const int FRAME_PC_SLOT = 2;
-const int PROBE_SP_LIMIT = 0;
 const int PLT_HEADER_SIZE = 24;
 const int PLT_ENTRY_SIZE = 24;
 const int PERF_REG_PC = 32;  // PERF_REG_POWERPC_NIP
@@ -147,7 +142,6 @@ const int BREAKPOINT_OFFSET = 0;
 
 const int SYSCALL_SIZE = sizeof(instruction_t);
 const int FRAME_PC_SLOT = 1;    // return address is at -1 from FP
-const int PROBE_SP_LIMIT = 0;
 const int PLT_HEADER_SIZE = 24; // Best guess from examining readelf
 const int PLT_ENTRY_SIZE = 24;  // ...same...
 const int PERF_REG_PC = 0;      // PERF_REG_RISCV_PC
@@ -168,7 +162,6 @@ const int BREAKPOINT_OFFSET = 0;
 
 const int SYSCALL_SIZE = sizeof(instruction_t);
 const int FRAME_PC_SLOT = 1;
-const int PROBE_SP_LIMIT = 0;
 const int PLT_HEADER_SIZE = 32;
 const int PLT_ENTRY_SIZE = 16;
 const int PERF_REG_PC = 0;      // PERF_REG_LOONGARCH_PC

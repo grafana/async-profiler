@@ -8,10 +8,31 @@
 
 #include <jvmti.h>
 #include <stdint.h>
-#include <string.h>
 #include <type_traits>
 #include "codeCache.h"
 
+
+// Inline string comparison to avoid indirect call to strcmp
+template<size_t N>
+static bool streq(const char* s, const char (&pattern)[N]) {
+    for (size_t i = 0; i < N; i++) {
+        if (s[i] != pattern[i]) return false;
+    }
+    return true;
+}
+
+// Same as streq but compares one byte less
+template<size_t N>
+static bool startsWith(const char* s, const char (&pattern)[N]) {
+    for (size_t i = 0; i < N - 1; i++) {
+        if (s[i] != pattern[i]) return false;
+    }
+    return true;
+}
+
+
+class NMethod;
+class VMMethod;
 
 class VMStructs {
   protected:
@@ -111,8 +132,8 @@ class VMStructs {
     static unsigned char _unsigned5_base;
     static const void** _call_stub_return_addr;
     static const void* _call_stub_return;
-    static const void* _interpreted_frame_valid_start;
-    static const void* _interpreted_frame_valid_end;
+    static const void* _interpreter_start;
+    static NMethod* _interpreter_nm;
 
     static jfieldID _eetop;
     static jfieldID _tid;
@@ -129,7 +150,6 @@ class VMStructs {
     static void initOffsets();
     static void resolveOffsets();
     static void patchSafeFetch();
-    static void initJvmFunctions();
     static void initTLS(void* vm_thread);
     static void initThreadBridge();
 
@@ -182,10 +202,6 @@ class VMStructs {
     static bool hasJavaThreadId() {
         return _tid != NULL;
     }
-
-    static bool isInterpretedFrameValidFunc(const void* pc) {
-        return pc >= _interpreted_frame_valid_start && pc < _interpreted_frame_valid_end;
-    }
 };
 
 
@@ -206,10 +222,6 @@ class MethodList {
         }
     }
 };
-
-
-class NMethod;
-class VMMethod;
 
 class VMSymbol : VMStructs {
   public:
@@ -300,7 +312,7 @@ class VMKlass : VMStructs {
     }
 
     jmethodID* jmethodIDs() {
-        return __atomic_load_n((jmethodID**) at(_jmethod_ids_offset), __ATOMIC_ACQUIRE);
+        return loadAcquire(*(jmethodID**) at(_jmethod_ids_offset));
     }
 };
 
@@ -327,10 +339,6 @@ class JavaFrameAnchor : VMStructs {
 
     const void* lastJavaPC() {
         return *(const void**) at(_anchor_pc_offset);
-    }
-
-    void setLastJavaPC(const void* pc) {
-        *(const void**) at(_anchor_pc_offset) = pc;
     }
 
     bool getFrame(const void*& pc, uintptr_t& sp, uintptr_t& fp) {
@@ -401,10 +409,6 @@ class VMThread : VMStructs {
         return _thread_state_offset >= 0 ? *(int*) at(_thread_state_offset) : 0;
     }
 
-    bool inJava() {
-        return state() == 8;
-    }
-
     bool inDeopt() {
         return *(void**) at(_thread_vframe_offset) != NULL;
     }
@@ -462,15 +466,6 @@ class NMethod : VMStructs {
         return *(short*) at(_frame_complete_offset);
     }
 
-    void setFrameCompleteOffset(int offset) {
-        if (_nmethod_immutable_offset > 0) {
-            // _frame_complete_offset is short on JDK 23+
-            *(short*) at(_frame_complete_offset) = offset;
-        } else {
-            *(int*) at(_frame_complete_offset) = offset;
-        }
-    }
-
     const char* immutableDataAt(int offset) {
         if (_nmethod_immutable_offset > 0) {
             return *(const char**) at(_nmethod_immutable_offset) + offset;
@@ -518,24 +513,23 @@ class NMethod : VMStructs {
         return *(const char**) at(_nmethod_name_offset);
     }
 
-    bool isNMethod() {
-        const char* n = name();
-        return n != NULL && (strcmp(n, "nmethod") == 0 || strcmp(n, "native nmethod") == 0);
+    bool isInterpreter() {
+        return this == _interpreter_nm;
     }
 
-    bool isInterpreter() {
+    bool isNMethod() {
         const char* n = name();
-        return n != NULL && strcmp(n, "Interpreter") == 0;
+        return n != NULL && (streq(n, "nmethod") || streq(n, "native nmethod"));
     }
 
     bool isStub() {
         const char* n = name();
-        return n != NULL && strncmp(n, "StubRoutines", 12) == 0;
+        return n != NULL && startsWith(n, "StubRoutines");
     }
 
     bool isVTableStub() {
         const char* n = name();
-        return n != NULL && strcmp(n, "vtable chunks") == 0;
+        return n != NULL && startsWith(n, "vtable chunks");
     }
 
     VMMethod* method() {
@@ -544,10 +538,6 @@ class NMethod : VMStructs {
 
     char state() {
         return *at(_nmethod_state_offset);
-    }
-
-    bool isAlive() {
-        return state() >= 0 && state() <= 1;
     }
 
     int level() {
@@ -594,6 +584,11 @@ class CodeHeap : VMStructs {
         for (const void* high = _code_heap_high;
              end > high && !__sync_bool_compare_and_swap(&_code_heap_high, high, end);
              high = _code_heap_high);
+    }
+
+    static void setInterpreterStart(const void* start) {
+        _interpreter_start = start;
+        _interpreter_nm = findNMethod(start);
     }
 
     static NMethod* findNMethod(const void* pc) {

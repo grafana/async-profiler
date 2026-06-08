@@ -6,9 +6,9 @@
 #ifdef __loongarch_lp64
 
 #include <errno.h>
-#include <string.h>
 #include <sys/syscall.h>
 #include "stackFrame.h"
+#include "vmStructs.h"
 
 #define REG(l)  _ucontext->uc_mcontext.__gregs[l]
 
@@ -67,18 +67,13 @@ void StackFrame::ret() {
 bool StackFrame::unwindStub(instruction_t* entry, const char* name, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
     instruction_t* ip = (instruction_t*)pc;
     if (ip == entry
-        || strncmp(name, "itable", 6) == 0
-        || strncmp(name, "vtable", 6) == 0
-        || strcmp(name, "InlineCacheBuffer") == 0)
+        || startsWith(name, "itable")
+        || startsWith(name, "vtable")
+        || streq(name, "InlineCacheBuffer"))
     {
         pc = link();
         return true;
     }
-    return false;
-}
-
-bool StackFrame::unwindCompiled(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
-    // Not yet implemented
     return false;
 }
 
@@ -99,10 +94,6 @@ bool StackFrame::unwindAtomicStub(const void*& pc) {
 
 void StackFrame::adjustSP(const void* entry, const void* pc, uintptr_t& sp) {
     // Not yet implemented
-}
-
-bool StackFrame::skipFaultInstruction() {
-    return false;
 }
 
 bool StackFrame::checkInterruptedSyscall() {

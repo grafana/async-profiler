@@ -6,7 +6,6 @@
 #ifdef __i386__
 
 #include <errno.h>
-#include <string.h>
 #include "stackFrame.h"
 #include "vmStructs.h"
 
@@ -70,9 +69,9 @@ void StackFrame::ret() {
 bool StackFrame::unwindStub(instruction_t* entry, const char* name, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
     instruction_t* ip = (instruction_t*)pc;
     if (ip == entry || *ip == 0xc3
-        || strncmp(name, "itable", 6) == 0
-        || strncmp(name, "vtable", 6) == 0
-        || strcmp(name, "InlineCacheBuffer") == 0)
+        || startsWith(name, "itable")
+        || startsWith(name, "vtable")
+        || streq(name, "InlineCacheBuffer"))
     {
         pc = *(uintptr_t*)sp;
         sp += 4;
@@ -91,27 +90,6 @@ bool StackFrame::unwindStub(instruction_t* entry, const char* name, uintptr_t& p
             pc = ((uintptr_t*)sp)[-1];
             return true;
         }
-    }
-    return false;
-}
-
-bool StackFrame::unwindCompiled(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
-    instruction_t* ip = (instruction_t*)pc;
-    instruction_t* entry = (instruction_t*)nm->entry();
-    if (ip <= entry
-        || *ip == 0xc3      // ret
-        || *ip == 0x55      // push ebp
-        || ip[-1] == 0x5d)  // after pop ebp
-    {
-        pc = *(uintptr_t*)sp;
-        sp += 4;
-        return true;
-    } else if (*ip == 0x5d) {
-        // pop ebp
-        fp = ((uintptr_t*)sp)[0];
-        pc = ((uintptr_t*)sp)[1];
-        sp += 8;
-        return true;
     }
     return false;
 }
@@ -144,10 +122,6 @@ bool StackFrame::unwindAtomicStub(const void*& pc) {
 
 void StackFrame::adjustSP(const void* entry, const void* pc, uintptr_t& sp) {
     // Not needed
-}
-
-bool StackFrame::skipFaultInstruction() {
-    return false;
 }
 
 bool StackFrame::checkInterruptedSyscall() {

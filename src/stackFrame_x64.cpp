@@ -6,7 +6,6 @@
 #ifdef __x86_64__
 
 #include <errno.h>
-#include <string.h>
 #include <sys/syscall.h>
 #include "stackFrame.h"
 #include "vmStructs.h"
@@ -77,9 +76,9 @@ void StackFrame::ret() {
 bool StackFrame::unwindStub(instruction_t* entry, const char* name, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
     instruction_t* ip = (instruction_t*)pc;
     if (ip == entry || *ip == 0xc3
-        || strncmp(name, "itable", 6) == 0
-        || strncmp(name, "vtable", 6) == 0
-        || strcmp(name, "InlineCacheBuffer") == 0)
+        || startsWith(name, "itable")
+        || startsWith(name, "vtable")
+        || streq(name, "InlineCacheBuffer"))
     {
         pc = ((uintptr_t*)sp)[0] - 1;
         sp += 8;
@@ -98,48 +97,6 @@ bool StackFrame::unwindStub(instruction_t* entry, const char* name, uintptr_t& p
             pc = ((uintptr_t*)sp)[-1] - 1;
             return true;
         }
-    }
-    return false;
-}
-
-bool StackFrame::unwindCompiled(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
-    instruction_t* ip = (instruction_t*)pc;
-    instruction_t* entry = (instruction_t*)nm->entry();
-    if (ip <= entry
-        || *ip == 0xc3                                                          // ret
-        || *ip == 0x55                                                          // push rbp
-        || ip[-1] == 0x5d                                                       // after pop rbp
-        || (ip[0] == 0x41 && ip[1] == 0x85 && ip[2] == 0x02 && ip[3] == 0xc3))  // poll return
-    {
-        // Subtract 1 for PC to point to the call instruction,
-        // otherwise it may be attributed to a wrong bytecode
-        pc = ((uintptr_t*)sp)[0] - 1;
-        sp += 8;
-        return true;
-    } else if (*ip == 0x5d) {
-        // pop rbp
-        fp = ((uintptr_t*)sp)[0];
-        pc = ((uintptr_t*)sp)[1] - 1;
-        sp += 16;
-        return true;
-    } else if (ip <= entry + 15 && ((uintptr_t)ip & 0xfff) && ip[-1] == 0x55) {
-        // push rbp
-        pc = ((uintptr_t*)sp)[1] - 1;
-        sp += 16;
-        return true;
-    } else if (ip <= entry + 7 && ip[0] == 0x48 && ip[1] == 0x89 && ip[2] == 0x6c && ip[3] == 0x24) {
-        // mov [rsp + #off], rbp
-        sp += ip[4] + 16;
-        pc = ((uintptr_t*)sp)[-1] - 1;
-        return true;
-    } else if ((ip[0] == 0x41 && ip[1] == 0x81 && ip[2] == 0x7f && *(u32*)(ip + 4) == 1) ||
-               (ip >= entry + 8 && ip[-8] == 0x41 && ip[-7] == 0x81 && ip[-6] == 0x7f && *(u32*)(ip - 4) == 1)) {
-        // cmp [r15 + #off], 1
-        // nmethod_entry_barrier: frame is fully constructed here
-        sp += nm->frameSize() * sizeof(void*);
-        fp = ((uintptr_t*)sp)[-2];
-        pc = ((uintptr_t*)sp)[-1];
-        return true;
     }
     return false;
 }
@@ -245,40 +202,6 @@ bool StackFrame::unwindAtomicStub(const void*& pc) {
 
 void StackFrame::adjustSP(const void* entry, const void* pc, uintptr_t& sp) {
     // Not needed
-}
-
-// Skip failed MOV instruction by writing 0 to destination register
-bool StackFrame::skipFaultInstruction() {
-    unsigned int insn = *(unsigned int*)pc();
-    if ((insn & 0x80fff8) == 0x008b48) {
-        // mov r64, [r64 + offs]
-        unsigned int reg = ((insn << 1) & 8) | ((insn >> 19) & 7);
-        switch (reg) {
-            case 0x0: REG(RAX, rax) = 0; break;
-            case 0x1: REG(RCX, rcx) = 0; break;
-            case 0x2: REG(RDX, rdx) = 0; break;
-            case 0x3: REG(RBX, rbx) = 0; break;
-            case 0x4: return false;  // Do not modify RSP
-            case 0x5: REG(RBP, rbp) = 0; break;
-            case 0x6: REG(RSI, rsi) = 0; break;
-            case 0x7: REG(RDI, rdi) = 0; break;
-            case 0x8: REG(R8 , r8 ) = 0; break;
-            case 0x9: REG(R9 , r9 ) = 0; break;
-            case 0xa: REG(R10, r10) = 0; break;
-            case 0xb: REG(R11, r11) = 0; break;
-            case 0xc: REG(R12, r12) = 0; break;
-            case 0xd: REG(R13, r13) = 0; break;
-            case 0xe: REG(R14, r14) = 0; break;
-            case 0xf: REG(R15, r15) = 0; break;
-        }
-
-        unsigned int insn_size = 3;
-        if ((insn & 0x070000) == 0x040000) insn_size++;
-        if ((insn & 0x400000) == 0x400000) insn_size++;
-        pc() += insn_size;
-        return true;
-    }
-    return false;
 }
 
 bool StackFrame::checkInterruptedSyscall() {
