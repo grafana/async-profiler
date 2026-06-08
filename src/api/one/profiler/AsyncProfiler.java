@@ -303,6 +303,16 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     }
 
     /**
+     * Sets the W3C 128 bit trace ID for the current thread. The two arguments
+     * are the high and low 64 bit halves of the trace ID, in that order.
+     * Pass 0, 0 to clear. The trace ID is dumped per sample in JFR alongside
+     * span ID and span name.
+     */
+    public void setTraceId(long hi, long lo) {
+        setTraceId0(hi, lo);
+    }
+
+    /**
      * Clears context identifier for current thread.
      */
     public void clearContextId() {
@@ -320,4 +330,5 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     private native void filterThread0(Thread thread, boolean enable);
     private native void setContextId0(long contextId);
     private native void setTracingContext0(long spanId, long spanName);
+    private native void setTraceId0(long hi, long lo);
 }

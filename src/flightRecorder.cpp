@@ -1037,6 +1037,8 @@ class Recording {
         buf->putVar64(Profiler::instance()->getSpanId());
         buf->putVar64(Profiler::instance()->getSpanName());
         buf->putVar64(Profiler::instance()->getContextId());
+        buf->putVar64(Profiler::instance()->getTraceIdHi());
+        buf->putVar64(Profiler::instance()->getTraceIdLo());
     }
 
     void writeUserEventTypes(Buffer* buf) {
@@ -1083,6 +1085,8 @@ class Recording {
         buf->putVar64(event->_span_id);
         buf->putVar64(event->_span_name);
         buf->putVar64(event->_context_id);
+        buf->putVar64(event->_trace_id_hi);
+        buf->putVar64(event->_trace_id_lo);
         buf->putVar32(event->_samples);
         buf->putVar64(event->_time_span);
         buf->put8(start, buf->offset() - start);
