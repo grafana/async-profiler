@@ -107,6 +107,7 @@ jobs:
       container-image: ${{ matrix.container-image }}
       java-version: ${{ matrix.java-version }}
       java-distribution: ${{ matrix.java-distribution }}
+      retry-count: 1
 
   integ-macos:
     name: integ / macos
