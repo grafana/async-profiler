@@ -27,16 +27,13 @@ jobs:
       image: ${{ inputs.container-image && format('public.ecr.aws/async-profiler/asprof-builder-{0}', inputs.container-image) || '' }} # zizmor: ignore[unpinned-images]
     name: "build and unit test (${{ inputs.platform }})"
     steps:
-      - name: Run container setup
-        if: inputs.container-image != ''
-        run: "[ ! -f /root/setup.sh ] || /root/setup.sh"
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
           distribution: ${{ env.build_java_distribution }}
           java-version: ${{ env.build_java_version }}
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Build and unit test
         id: build
         run: |
@@ -65,20 +62,20 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
           PLATFORM: ${{ inputs.platform }}
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.set_artifact_name.outputs.artifact_name }}
           path: ${{ steps.build.outputs.archive }}
           if-no-files-found: error
       - name: Upload debug info
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: inputs.platform != 'macos'
         with:
           name: ${{ steps.set_artifact_name.outputs.artifact_name }}-debug
           path: ${{ steps.build.outputs.debug_archive }}
           if-no-files-found: error
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-coverage-${{ inputs.platform }}
           path: build/test/coverage/
