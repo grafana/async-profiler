@@ -41,12 +41,12 @@ jobs:
   integration-test:
     runs-on: ${{ inputs.runner }}
     container:
-      image: ${{ inputs.container-image && format('public.ecr.aws/async-profiler/asprof-builder-{0}', inputs.container-image) || '' }}
+      image: ${{ inputs.container-image && format('public.ecr.aws/async-profiler/asprof-builder-{0}', inputs.container-image) || '' }} # zizmor: ignore[unpinned-images]
       options: --privileged
     name: "${{ inputs.test-platform }}, ${{ inputs.java-distribution }} ${{ inputs.java-version }}"
     steps:
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         # https://github.com/actions/setup-java/issues/678#issuecomment-2446279753
         if: ${{ !inputs.use-builtin-jdk }}
         with:
@@ -54,22 +54,25 @@ jobs:
           java-version: ${{ inputs.java-version }}
           architecture: ${{ inputs.architecture }}
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Set variables
         id: set_variables
         run: |
-          echo "short_sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
-          echo "artifact_name=async-profiler-${{ inputs.platform }}-${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+          echo "short_sha=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=async-profiler-${PLATFORM}-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
         shell: bash
         env:
           GITHUB_SHA: ${{ github.sha }}
+          PLATFORM: ${{ inputs.platform }}
       - name: Download async-profiler release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ steps.set_variables.outputs.artifact_name }}
           path: async_profiler_release
       - name: Download async-profiler JAR artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: async-profiler-jars
           path: jar_artifacts
@@ -77,7 +80,7 @@ jobs:
         id: extract_artifact
         run: |
           release_archive=$(basename $(find async_profiler_release -type f -iname "async-profiler-*" ))
-          case "${{ inputs.runner }}" in
+          case "$RUNNER" in
             macos*)
               unzip async_profiler_release/$release_archive
             ;;
@@ -87,6 +90,8 @@ jobs:
           esac
           echo "jars_directory=jar_artifacts" >> $GITHUB_OUTPUT
           echo "release_directory=$(basename $(find . -type d -iname "async-profiler-*" ))" >> $GITHUB_OUTPUT
+        env:
+          RUNNER: ${{ inputs.runner }}
       - name: Download Protobuf Java runtime
         run: |
           mkdir -p test/deps
@@ -97,13 +102,16 @@ jobs:
       - name: Run integration tests
         run: |
           mkdir -p build/jar
-          cp ${{ steps.extract_artifact.outputs.jars_directory }}/* build/jar
+          cp "$JARS_DIRECTORY"/* build/jar
           make build/test.jar
-          cp -r ${{ steps.extract_artifact.outputs.release_directory }}/bin build
-          cp -r ${{ steps.extract_artifact.outputs.release_directory }}/lib build
+          cp -r "$RELEASE_DIRECTORY"/bin build
+          cp -r "$RELEASE_DIRECTORY"/lib build
           make test-java TEST_THREADS=2 RETRY_COUNT=${{ inputs.retry-count }} -j
+        env:
+          JARS_DIRECTORY: ${{ steps.extract_artifact.outputs.jars_directory }}
+          RELEASE_DIRECTORY: ${{ steps.extract_artifact.outputs.release_directory }}
       - name: Upload integration test logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: integration-test-logs-${{ inputs.test-platform }}-${{ inputs.java-version }}-${{ steps.set_variables.outputs.short_sha }}

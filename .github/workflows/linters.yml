@@ -15,7 +15,9 @@ jobs:
   markdown:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Install prettier
         run: |
           npm install -g prettier@3.4.2
@@ -23,7 +25,9 @@ jobs:
   eof-newline:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: EOF newline check
         env:
           offenders_path: /tmp/eof_newline_offenders.txt
@@ -41,7 +45,9 @@ jobs:
   trailing-spaces:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Trailing spaces check
         env:
           offenders_path: /tmp/trailing_space_offenders.txt
