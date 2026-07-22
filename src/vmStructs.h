@@ -49,6 +49,7 @@ class VMStructs {
     static bool _has_perm_gen;
     static bool _can_dereference_jmethod_id;
     static bool _compact_object_headers;
+    static bool _compressed_class_pointers;
 
     static int _klass_name_offset;
     static int _symbol_length_offset;
@@ -109,7 +110,7 @@ class VMStructs {
     static const char* _flags_addr;
     static int _flag_count;
     static int _flag_size;
-    static char* _code_heap[3];
+    static char* _code_heap[4];
     static const void* _code_heap_low;
     static const void* _code_heap_high;
     static char** _code_heap_addr;
@@ -595,6 +596,7 @@ class CodeHeap : VMStructs {
         if (contains(_code_heap[0], pc)) return findNMethod(_code_heap[0], pc);
         if (contains(_code_heap[1], pc)) return findNMethod(_code_heap[1], pc);
         if (contains(_code_heap[2], pc)) return findNMethod(_code_heap[2], pc);
+        if (contains(_code_heap[3], pc)) return findNMethod(_code_heap[3], pc);
         return NULL;
     }
 };

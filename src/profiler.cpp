@@ -68,7 +68,7 @@ static CTimer ctimer;
 static ITimer itimer;
 static Instrument instrument;
 
-static ProfilingWindow profiling_window;
+static SpanEvent profiling_window;
 static pthread_key_t local_context_id_key;
 static pthread_key_t local_span_id_key;
 static pthread_key_t local_span_name_key;
@@ -569,14 +569,6 @@ void Profiler::tryResetCounters() {
     if (!_jfr.active()) {
         _call_trace_storage.resetCounters();
     }
-}
-
-void Profiler::writeLog(LogLevel level, const char* message) {
-    _jfr.recordLog(level, message, strlen(message));
-}
-
-void Profiler::writeLog(LogLevel level, const char* message, size_t len) {
-    _jfr.recordLog(level, message, len);
 }
 
 void* Profiler::dlopen_hook(const char* filename, int flags) {
@@ -1181,6 +1173,7 @@ Error Profiler::flushJfr() {
 
     updateJavaThreadNames();
     updateNativeThreadNames();
+    if (_event_mask & EM_WALL) wall_clock.flush();
 
     lockAll();
     _jfr.flush();
@@ -1200,6 +1193,7 @@ Error Profiler::dump(Writer& out, Arguments& args) {
     if (_state == RUNNING) {
         updateJavaThreadNames();
         updateNativeThreadNames();
+        if (_event_mask & EM_WALL) wall_clock.flush();
     }
 
     switch (args._output) {
