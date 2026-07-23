@@ -265,7 +265,8 @@ class ElfParser {
 
     void calcVirtualLoadAddress();
     void parseDynamicSection();
-    void parseDwarfInfo();
+    void parseUnwindInfo();
+    void parseDebugFrameSection();
     uint32_t getSymbolCount(uint32_t* gnu_hash);
     void loadSymbols(bool use_debug);
     bool loadSymbolsFromDebug(const char* build_id, const int build_id_len);
@@ -327,6 +328,10 @@ bool ElfParser::parseFile(CodeCache* cc, const char* base, const char* file_name
         if (elf.validHeader()) {
             elf.calcVirtualLoadAddress();
             elf.loadSymbols(use_debug);
+            if (!use_debug || elf.findProgramHeader(PT_GNU_EH_FRAME) == NULL) {
+                // Prefer .debug_frame to .eh_frame_hdr only for external debuginfo objects
+                elf.parseDebugFrameSection();
+            }
         }
         munmap(addr, length);
     }
@@ -339,7 +344,7 @@ void ElfParser::parseProgramHeaders(CodeCache* cc, const char* base, const char*
         cc->setTextBase(base);
         elf.calcVirtualLoadAddress();
         elf.parseDynamicSection();
-        elf.parseDwarfInfo();
+        elf.parseUnwindInfo();
     }
 }
 
@@ -453,17 +458,31 @@ void ElfParser::parseDynamicSection() {
     }
 }
 
-void ElfParser::parseDwarfInfo() {
-    if (!DWARF_SUPPORTED) return;
+void ElfParser::parseUnwindInfo() {
+    if (!DWARF_SUPPORTED || _cc->hasDwarfTable()) return;
 
     ElfProgramHeader* eh_frame_hdr = findProgramHeader(PT_GNU_EH_FRAME);
     if (eh_frame_hdr != NULL && eh_frame_hdr->p_vaddr != 0) {
-        DwarfParser dwarf(_cc->name(), _base, at(eh_frame_hdr));
+        DwarfParser dwarf(_cc->name(), _base);
+        dwarf.parseEhFrame(at(eh_frame_hdr));
         _cc->setDwarfTable(dwarf.table(), dwarf.count());
     } else if (strcmp(_cc->name(), "[vdso]") == 0) {
         FrameDesc* table = (FrameDesc*)malloc(sizeof(FrameDesc));
         *table = FrameDesc::empty_frame;
         _cc->setDwarfTable(table, 1);
+    }
+}
+
+void ElfParser::parseDebugFrameSection() {
+    if (!DWARF_SUPPORTED || _cc->hasDwarfTable()) return;
+
+    ElfSection* debug_frame = findSection(SHT_PROGBITS, ".debug_frame");
+    if (debug_frame != NULL) {
+        // Subtract the load bias from the runtime load address
+        DwarfParser dwarf(_cc->name(), _base - (uintptr_t)base());
+        dwarf.parseDebugFrame(at(debug_frame), debug_frame->sh_size);
+        _cc->setDwarfTable(dwarf.table(), dwarf.count());
+        _cc->setTextBase(_base);
     }
 }
 
@@ -721,7 +740,21 @@ void Symbols::parseKernelSymbols(CodeCache* cc) {
     fclose(f);
 }
 
-static void collectSharedLibraries(std::unordered_map<u64, SharedLibrary>& libs, int max_count) {
+static bool isEssentialLibrary(const char* file, const char* map_start, const char* map_end) {
+    const void* this_lib = (const void*)isEssentialLibrary;
+    if (this_lib >= map_start && this_lib < map_end) {
+        return true;  // async-profiler's own library
+    }
+
+    const char* base_name = strrchr(file, '/');
+    return base_name != NULL && (
+               strncmp(base_name + 1, "libjvm.", 7) == 0 ||
+               strncmp(base_name + 1, "libj9", 5) == 0 ||
+               strncmp(base_name + 1, "libazsys", 8) == 0
+           );
+}
+
+static void collectSharedLibraries(std::unordered_map<u64, SharedLibrary>& libs, int max_count, bool essential_only) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (f == NULL) {
         return;
@@ -757,6 +790,9 @@ static void collectSharedLibraries(std::unordered_map<u64, SharedLibrary>& libs,
         }
 
         if (map.isExecutable()) {
+            if (essential_only && !isEssentialLibrary(map.file(), map_start, map_end)) {
+                continue;
+            }
             SharedLibrary& lib = libs[inode];
             if (lib.file == nullptr) {
                 lib.file = strdup(map.file());
@@ -775,7 +811,7 @@ static void collectSharedLibraries(std::unordered_map<u64, SharedLibrary>& libs,
     fclose(f);
 }
 
-void Symbols::parseLibraries(CodeCacheArray* array, bool kernel_symbols) {
+void Symbols::parseLibraries(CodeCacheArray* array, bool kernel_symbols, bool essential_only) {
     MutexLocker ml(_parse_lock);
 
     if (_in_parse_libraries || array->count() >= MAX_NATIVE_LIBS) {
@@ -796,7 +832,7 @@ void Symbols::parseLibraries(CodeCacheArray* array, bool kernel_symbols) {
     }
 
     std::unordered_map<u64, SharedLibrary> libs;
-    collectSharedLibraries(libs, MAX_NATIVE_LIBS - array->count());
+    collectSharedLibraries(libs, MAX_NATIVE_LIBS - array->count(), essential_only);
 
     for (auto& it : libs) {
         u64 inode = it.first;
