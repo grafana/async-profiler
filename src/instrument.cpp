@@ -41,7 +41,7 @@ static inline u16 alignUp4(u16 i) {
 
 static bool matchesPattern(const char* value, size_t len, const std::string& pattern) {
     if (len == 0 || pattern.empty()) return false;
-    return (
+    return
         // wildcard match
         (
             pattern[pattern.length() - 1] == '*' &&
@@ -49,8 +49,7 @@ static bool matchesPattern(const char* value, size_t len, const std::string& pat
             memcmp(pattern.c_str(), value, pattern.length() - 1) == 0
         ) ||
         // full match
-        memcmp(pattern.c_str(), value, len) == 0
-    );
+        (len == pattern.length() && memcmp(pattern.c_str(), value, len) == 0);
 }
 
 static const MethodTargets* findMethodTargets(const Targets* targets, const char* class_name, size_t len) {
@@ -1272,8 +1271,10 @@ void JNICALL Instrument::recordExit0(JNIEnv* jni, jobject unused, jlong startTim
     if (shouldRecordSample()) {
         u64 now_ticks = TSC::ticks();
         u64 duration_ns = OS::nanotime() - (u64) startTimeNs;
-        u64 duration_ticks = (u64) ((double) duration_ns * TSC::frequency() / NANOTIME_FREQ);
-        MethodTraceEvent event(now_ticks - duration_ticks, duration_ticks);
+
+        MethodTraceEvent event;
+        event._duration = (u64) ((double) duration_ns * TSC::frequency() / NANOTIME_FREQ);
+        event._start_time = now_ticks - event._duration;
         Profiler::instance()->recordSample(NULL, duration_ns, METHOD_TRACE, &event);
     }
 }

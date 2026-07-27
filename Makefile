@@ -1,7 +1,7 @@
-PROFILER_VERSION ?= 4.4.0.0
+PROFILER_VERSION ?= 4.5.0.0
 
 ifeq ($(COMMIT_TAG),true)
-  PROFILER_VERSION := $(PROFILER_VERSION)-$(shell git rev-parse --short=8 HEAD)
+  PROFILER_VERSION := $(PROFILER_VERSION)-$(shell git rev-parse --short=7 HEAD)
 else ifneq ($(COMMIT_TAG),)
   PROFILER_VERSION := $(PROFILER_VERSION)-$(COMMIT_TAG)
 endif
@@ -15,6 +15,7 @@ DEBUG_PACKAGE_DIR=$(PACKAGE_DIR)-debug
 
 ASPROF=bin/asprof
 JFRCONV=bin/jfrconv
+JFRCONV_NI=bin/jfr-converter
 LIB_PROFILER=lib/libasyncProfiler.$(SOEXT)
 LIB_PROFILER_DEBUG=libasyncProfiler.$(SOEXT).debug
 ASPROF_HEADER=include/asprof.h
@@ -39,7 +40,7 @@ endif
 CFLAGS_EXTRA ?=
 CXXFLAGS_EXTRA ?=
 CFLAGS=-O3 -fno-exceptions $(CFLAGS_EXTRA)
-CXXFLAGS=-O3 -fno-exceptions -fno-omit-frame-pointer -fvisibility=hidden -std=c++11 $(CXXFLAGS_EXTRA)
+CXXFLAGS=-O3 -fno-exceptions -fno-rtti -fno-omit-frame-pointer -fvisibility=hidden -std=c++11 $(CXXFLAGS_EXTRA)
 CPPFLAGS=
 DEFS=-DPROFILER_VERSION=\"$(PROFILER_VERSION)\"
 INCLUDES=-I$(JAVA_HOME)/include -Isrc/helper
@@ -53,6 +54,9 @@ JAVA=$(JAVA_HOME)/bin/java
 JAVA_TARGET=8
 JAVAC_OPTIONS=--release $(JAVA_TARGET) -Xlint:-options
 TEST_JAVA ?= $(JAVA_HOME)/bin/java
+
+NATIVE_IMAGE=$(JAVA_HOME)/bin/native-image
+NI_FLAGS=-O3 --initialize-at-build-time
 
 TEST_LIB_DIR=build/test/lib
 TEST_BIN_DIR=build/test/bin
@@ -71,8 +75,8 @@ HEADERS := $(wildcard src/*.h)
 RESOURCES := $(wildcard src/res/*)
 JAVA_HELPER_CLASSES := $(wildcard src/helper/one/profiler/*.class)
 API_SOURCES := $(wildcard src/api/one/profiler/*.java)
-JAR_MANIFEST := src/api/one/profiler/MANIFEST.MF
-CONVERTER_SOURCES := $(shell find src/converter -name '*.java')
+JAR_MANIFEST := src/api/META-INF/MANIFEST.MF
+CONVERTER_SOURCES := $(shell find src/converter -type f)
 TEST_SOURCES := $(shell find test -name '*.java' ! -path 'test/stubs/*')
 TESTS ?=
 CPP_TEST_SOURCES := test/native/testRunner.cpp $(shell find test/native -name '*Test.cpp')
@@ -138,11 +142,13 @@ ifneq (,$(STATIC_BINARY))
   CFLAGS += -static -fdata-sections -ffunction-sections -Wl,--gc-sections
 endif
 
-.PHONY: all jar release build-test test clean coverage clean-coverage build-test-java build-test-cpp test-cpp test-java check-md format-md
+.PHONY: all jar ni release build-test test clean coverage clean-coverage build-test-java build-test-cpp test-cpp test-java check-md format-md
 
 all: build/bin build/lib build/$(LIB_PROFILER) build/$(ASPROF) jar build/$(JFRCONV) build/$(ASPROF_HEADER)
 
 jar: build/jar build/$(API_JAR) build/$(CONVERTER_JAR)
+
+ni: build/bin build/$(JFRCONV_NI)
 
 release: $(PACKAGE_NAME).$(PACKAGE_EXT)
 
@@ -187,6 +193,9 @@ build/$(JFRCONV): src/launcher/launcher.sh build/$(CONVERTER_JAR)
 	chmod +x $@
 	cat build/$(CONVERTER_JAR) >> $@
 
+build/$(JFRCONV_NI): build/$(CONVERTER_JAR)
+	$(NATIVE_IMAGE) $(NI_FLAGS) -jar $< $@
+
 build/$(LIB_PROFILER): $(SOURCES) $(HEADERS) $(RESOURCES) $(JAVA_HELPER_CLASSES)
 ifeq ($(MERGE),true)
 	for f in src/*.cpp; do echo '#include "'$$f'"'; done |\
@@ -207,8 +216,8 @@ build/$(API_JAR): $(API_SOURCES) $(JAR_MANIFEST)
 
 build/$(CONVERTER_JAR): $(CONVERTER_SOURCES) $(RESOURCES)
 	mkdir -p build/converter
-	$(JAVAC) $(JAVAC_OPTIONS) -d build/converter $(CONVERTER_SOURCES)
-	$(JAR) cfe $@ one.convert.Main -C build/converter . -C src/res .
+	$(JAVAC) $(JAVAC_OPTIONS) -d build/converter $(filter %.java,$(CONVERTER_SOURCES))
+	$(JAR) cfe $@ one.convert.Main -C build/converter . -C src/res . -C src/converter META-INF
 	$(RM) -r build/converter
 
 %.class: %.java
@@ -247,6 +256,11 @@ ifeq ($(OS_TAG),linux)
 
 	$(AS) -o $(TEST_LIB_DIR)/twiceatzero.o test/native/libs/twiceatzero.s
 	$(LD) -shared -o $(TEST_LIB_DIR)/libtwiceatzero.$(SOEXT) $(TEST_LIB_DIR)/twiceatzero.o --section-start=.seg1=0x4000 -z max-page-size=0x1000
+
+	$(CC) -shared -fPIC -O2 -g -fno-asynchronous-unwind-tables -fno-unwind-tables -fomit-frame-pointer -fno-optimize-sibling-calls $(INCLUDES) -Isrc -o $(TEST_LIB_DIR)/libdebugframe.$(SOEXT) test/native/libs/debugframe.c
+	objcopy --only-keep-debug $(TEST_LIB_DIR)/libdebugframe.$(SOEXT) $(TEST_LIB_DIR)/libdebugframe.$(SOEXT).debug
+	objcopy --strip-all $(TEST_LIB_DIR)/libdebugframe.$(SOEXT)
+	objcopy --add-gnu-debuglink=$(TEST_LIB_DIR)/libdebugframe.$(SOEXT).debug $(TEST_LIB_DIR)/libdebugframe.$(SOEXT)
 endif
 	@touch $@
 
@@ -295,25 +309,6 @@ build/$(TEST_JAR): build/$(API_JAR) $(TEST_SOURCES) build/$(CONVERTER_JAR) $(TES
 		 -d build/test/classes \
 		 $(TEST_SOURCES)
 	$(JAR) cf $@ -C build/test/classes .
-
-update-otlp-classes-jar:
-	@if [ -z "$(OTEL_PROTO_PATH)" ]; then \
-		echo "'OTEL_PROTO_PATH' is empty"; \
-		exit 1; \
-	fi
-	rm -rf $(TMP_DIR)/gen/java $(TMP_DIR)/build
-	mkdir -p $(TMP_DIR)/gen/java $(TMP_DIR)/build $(TEST_GEN_DIR)
-	cd $(OTEL_PROTO_PATH) && protoc --java_out=$(TMP_DIR)/gen/java $$(find . \
-		 -type f \
-		 -name '*.proto' \
-		 -not \( -name 'logs*.proto' -o -name 'metrics*.proto' -o -name 'trace*.proto' -o -name '*service.proto' \))
-	$(JAVAC) -source $(JAVA_TARGET) \
-		 -target $(JAVA_TARGET) \
-		 -cp $(TEST_DEPS_DIR)/* \
-		 -d $(TMP_DIR)/build \
-		 -Xlint:-options \
-		 $$(find $(TMP_DIR)/gen/java -name "*.java")
-	$(JAR) cvf $(TEST_GEN_DIR)/opentelemetry-gen-classes.jar -C $(TMP_DIR)/build .
 
 LINT_SOURCES=`ls -1 src/*.cpp src/*/*.cpp | grep -v rustDemangle.cpp`
 CLANG_TIDY_ARGS_EXTRA=
